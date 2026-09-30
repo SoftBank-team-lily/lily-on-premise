@@ -72,6 +72,7 @@ public class CloudBurst {
             return;
         }
         exposure.proxy().localLimit(settings.localLimit());
+        exposure.proxy().remoteIdle(settings.remoteIdleSeconds());
         scheduler.scheduleWithFixedDelay(this::safeTick, 1, 1, TimeUnit.SECONDS);
         event("enabled: localLimit=" + settings.localLimit() + " replicas=" + settings.replicas()
                 + " target=" + settings.ingressHost() + ":" + settings.ingressPort());

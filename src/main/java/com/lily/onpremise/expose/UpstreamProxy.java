@@ -34,6 +34,7 @@ public final class UpstreamProxy implements AutoCloseable {
     private volatile boolean open;
     private volatile int localLimit = Integer.MAX_VALUE;
     private volatile InetSocketAddress overflow;
+    private volatile long remoteIdleNanos = Long.MAX_VALUE;
     private final AtomicInteger localActive = new AtomicInteger();
     private final AtomicInteger remoteActive = new AtomicInteger();
     /** 로컬이 한도에 닿은 채로 들어온 연결 수 (누적). 버스팅 판단에 쓴다 */
@@ -85,6 +86,19 @@ public final class UpstreamProxy implements AutoCloseable {
             throw new IllegalArgumentException("local limit");
         }
         this.localLimit = limit;
+    }
+
+    /**
+     * 클라우드로 넘긴 연결이 응답을 끝내고 이 시간 동안 조용하면 닫는다.
+     * 앞단(cloudflared)은 keep-alive 로 연결을 풀에 붙잡고 재사용하므로, 닫지 않으면 부하가 끝나도
+     * 요청이 계속 클라우드로 가고 remoteActive 가 0 이 되지 않아 스케일 다운도 되지 않는다.
+     * 닫힌 뒤 앞단이 새로 여는 연결은 로컬에 자리가 있으면 로컬로 간다.
+     */
+    public void remoteIdle(int seconds) {
+        if (seconds < 1) {
+            throw new IllegalArgumentException("remote idle");
+        }
+        this.remoteIdleNanos = seconds * 1_000_000_000L;
     }
 
     public void overflowTo(InetSocketAddress target) {
@@ -149,6 +163,7 @@ public final class UpstreamProxy implements AutoCloseable {
                 overflowed.incrementAndGet();
             }
         }
+        boolean toCloud = counter == remoteActive;
         counter.incrementAndGet();
         try {
             if (upstream == null) {
@@ -166,8 +181,16 @@ public final class UpstreamProxy implements AutoCloseable {
                 ByteBuffer fromUpstream = ByteBuffer.allocate(8192);
                 boolean clientDone = false;
                 boolean upstreamDone = false;
+                // 요청을 보냈고 아직 응답 바이트가 오지 않았으면 닫지 않는다 (느린 응답을 끊지 않게)
+                boolean awaitingResponse = false;
+                long lastActivity = System.nanoTime();
                 while (!clientDone || !upstreamDone) {
-                    selector.select(1_000);
+                    selector.select(250);
+                    if (toCloud && !awaitingResponse
+                            && (overflow == null || System.nanoTime() - lastActivity >= remoteIdleNanos)) {
+                        // 응답을 끝낸 유휴 keep-alive 연결: 앞단이 다음 요청을 새 연결로 보내게 닫는다
+                        break;
+                    }
                     Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
                     while (keys.hasNext()) {
                         SelectionKey key = keys.next();
@@ -189,6 +212,10 @@ public final class UpstreamProxy implements AutoCloseable {
                                 upstreamDone = true;
                             }
                             continue;
+                        }
+                        if (read > 0) {
+                            lastActivity = System.nanoTime();
+                            awaitingResponse = inbound;
                         }
                         buffer.flip();
                         while (buffer.hasRemaining()) {

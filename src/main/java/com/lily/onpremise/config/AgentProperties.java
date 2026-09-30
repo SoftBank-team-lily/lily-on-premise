@@ -63,6 +63,8 @@ public record AgentProperties(
      * @param cooldownSeconds    이 시간 동안 한가하면 클라우드를 내린다
      * @param replicas           클라우드에 올릴 Pod 수 (DB 커넥션 제한: 로컬 1 + 클라우드 N, 각 풀 3 이 20 이하)
      * @param database           클라우드 대기 배포에 붙일 DB (postgres / mysql). 비우면 없음
+     * @param remoteIdleSeconds  클라우드로 넘긴 연결이 응답을 끝내고 이 시간 동안 조용하면 닫는다.
+     *                           cloudflared 가 keep-alive 로 연결을 붙잡아 클라우드에 계속 묶이는 것을 막는다
      */
     public record Burst(
             @DefaultValue("false") boolean enabled,
@@ -75,7 +77,8 @@ public record AgentProperties(
             @DefaultValue("3") int scaleUpAfterSeconds,
             @DefaultValue("30") int cooldownSeconds,
             @DefaultValue("2") int replicas,
-            @DefaultValue("") String database) {
+            @DefaultValue("") String database,
+            @DefaultValue("2") int remoteIdleSeconds) {
     }
 
     public record Cloudflare(
