@@ -2,12 +2,17 @@ package com.lily.onpremise.config;
 
 import com.lily.onpremise.AgentIdentity;
 import com.lily.onpremise.analyze.StackAnalyzer;
+import com.lily.onpremise.burst.BurstClient;
+import com.lily.onpremise.burst.CloudDatabase;
+import com.lily.onpremise.burst.DatabaseTunnel;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lily.onpremise.expose.CloudflareHostnameProvisioner;
 import com.lily.onpremise.expose.HealthProbe;
 import com.lily.onpremise.expose.HttpCloudflareClient;
 import com.lily.onpremise.expose.LocalExposure;
 import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
+import com.lily.onpremise.pipeline.DatabaseAccess;
 import com.lily.onpremise.pipeline.OnPremPipeline;
 import com.lily.onpremise.runtime.CliContainerRuntime;
 import com.lily.onpremise.runtime.ContainerRuntime;
@@ -82,6 +87,20 @@ public class RuntimeConfiguration {
         };
     }
 
+    /** 배포 요청에 database 가 있을 때 클라우드 RDS 를 SSH 터널로 붙인다. 설정이 없으면 DB 배포를 거절한다 */
+    @Bean
+    DatabaseAccess databaseAccess(AgentProperties properties, Commands commands, ObjectMapper json) {
+        AgentProperties.Database db = properties.database();
+        if (db == null || !db.configured() || properties.burst().builderUrl().isBlank()) {
+            return DatabaseAccess.NONE;
+        }
+        String dir = properties.workspace();
+        Path workDir = dir == null || dir.isBlank()
+                ? Path.of(System.getProperty("java.io.tmpdir"), "lily-onprem")
+                : Path.of(dir);
+        return new CloudDatabase(new DatabaseTunnel(db, commands, workDir), new BurstClient(properties.burst(), json));
+    }
+
     @Bean
     OnPremPipeline pipeline(
             Workspace workspace,
@@ -91,9 +110,10 @@ public class RuntimeConfiguration {
             LocalExposure exposure,
             PublicAddress publicAddress,
             SlotBook slots,
-            AgentProperties properties) {
+            AgentProperties properties,
+            DatabaseAccess databases) {
         return new OnPremPipeline(
                 workspace, analyzer, runtime, readiness, exposure, publicAddress, slots,
-                properties.bluePort(), properties.greenPort());
+                properties.bluePort(), properties.greenPort(), databases);
     }
 }

@@ -23,7 +23,14 @@ public record DeployJob(
         String healthPath,
         String rootDir,
         String dockerfile,
-        Map<String, String> env) {
+        Map<String, String> env,
+        String database) {
+
+    /** DB 없이 배포 */
+    public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
+                     String healthPath, String rootDir, String dockerfile, Map<String, String> env) {
+        this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, null);
+    }
 
     public DeployJob normalize() {
         String repo = require(repoUrl, "repoUrl");
@@ -63,6 +70,10 @@ public record DeployJob(
             throw new IllegalArgumentException("dockerfile 이 너무 깁니다");
         }
 
+        String engine = blankToNull(database);
+        if (engine != null && !engine.matches("postgres|mysql")) {
+            throw new IllegalArgumentException("database 는 postgres 또는 mysql 입니다");
+        }
         String secret = blankToNull(token);
         if (secret != null && !secret.matches("[A-Za-z0-9_]+")) {
             throw new IllegalArgumentException("token 형식이 올바르지 않습니다");
@@ -78,7 +89,8 @@ public record DeployJob(
                 health,
                 dir,
                 blankToNull(file),
-                cleanEnv(env));
+                cleanEnv(env),
+                engine);
     }
 
     private static URI parseRepo(String repo) {

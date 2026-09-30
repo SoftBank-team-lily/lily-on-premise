@@ -10,6 +10,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param proxyPort  공개 주소가 가리키는 로컬 포트. blue/green 컨테이너 포트와 다르다
  * @param publicUrl  API 없이 named tunnel 을 쓸 때의 고정 주소
  * @param burst      클라우드 버스팅. 기본은 꺼짐
+ * @param database   클라우드 RDS 연동 (SSH 터널). 배포 요청에 database 가 있을 때 쓴다
  */
 @ConfigurationProperties("lily.agent")
 public record AgentProperties(
@@ -22,7 +23,32 @@ public record AgentProperties(
         @DefaultValue("") String publicUrl,
         @DefaultValue("") String workspace,
         @DefaultValue Cloudflare cloudflare,
-        @DefaultValue Burst burst) {
+        @DefaultValue Burst burst,
+        @DefaultValue Database database) {
+
+    /**
+     * 온프레미스 앱이 클라우드와 같은 RDS 를 쓰도록 SSH 포트포워딩 터널을 연다.
+     * 배스천 계정은 RDS 포트로의 포워딩만 허용된다 (셸 없음). DB 계정·비밀번호는 lily-builder 를 거쳐 받는다.
+     *
+     * @param sshHost     배스천 (lily-server 공개 IP)
+     * @param sshUser     포워딩 전용 계정
+     * @param sshKey      개인키 파일 경로 (권한 600)
+     * @param remoteHost  RDS 엔드포인트
+     * @param bindHost    터널을 여는 로컬 주소. 컨테이너에서만 닿도록 Docker 브리지 게이트웨이(172.17.0.1)
+     */
+    public record Database(
+            @DefaultValue("") String sshHost,
+            @DefaultValue("lily-tunnel") String sshUser,
+            @DefaultValue("") String sshKey,
+            @DefaultValue("") String remoteHost,
+            @DefaultValue("5432") int remotePort,
+            @DefaultValue("172.17.0.1") String bindHost,
+            @DefaultValue("15432") int bindPort) {
+
+        public boolean configured() {
+            return !sshHost.isBlank() && !sshKey.isBlank() && !remoteHost.isBlank();
+        }
+    }
 
     /**
      * 온프레미스가 감당하지 못하는 연결을 클라우드(k3s)로 넘긴다.

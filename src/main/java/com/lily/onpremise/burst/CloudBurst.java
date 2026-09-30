@@ -108,7 +108,8 @@ public class CloudBurst {
 
     private void prepareStandby(DeployJob job, String publicHost) {
         try {
-            String id = client.standby(job, publicHost, settings.database());
+            String database = job.database() != null ? job.database() : settings.database();
+            String id = client.standby(job, publicHost, database);
             event("standby: cloud build " + id + " host=" + publicHost);
             long deadline = System.currentTimeMillis() + 15 * 60_000L;
             while (System.currentTimeMillis() < deadline) {

@@ -40,6 +40,7 @@ public final class OnPremPipeline {
     private final SlotBook slots;
     private final int bluePort;
     private final int greenPort;
+    private final DatabaseAccess databases;
 
     public OnPremPipeline(
             Workspace workspace,
@@ -51,6 +52,22 @@ public final class OnPremPipeline {
             SlotBook slots,
             int bluePort,
             int greenPort) {
+        this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
+                DatabaseAccess.NONE);
+    }
+
+    public OnPremPipeline(
+            Workspace workspace,
+            StackAnalyzer analyzer,
+            ContainerRuntime runtime,
+            Readiness readiness,
+            TrafficSwitch traffic,
+            PublicAddress addresses,
+            SlotBook slots,
+            int bluePort,
+            int greenPort,
+            DatabaseAccess databases) {
+        this.databases = databases;
         this.workspace = workspace;
         this.analyzer = analyzer;
         this.runtime = runtime;
@@ -110,6 +127,15 @@ public final class OnPremPipeline {
         Map<String, String> env = new LinkedHashMap<>();
         if (job.env() != null) {
             env.putAll(job.env());
+        }
+        if (job.database() != null) {
+            // 클라우드와 같은 DB. 접속 주소는 온프레미스에서 RDS 로 가는 터널
+            Map<String, String> db = databases.prepare(job);
+            env.putAll(db);
+            stage(record, publish, JobRecord.Status.STARTING, "database: " + job.database() + " env keys=" + db.keySet());
+            if (job.env() != null) {
+                env.putAll(job.env()); // 사용자가 넣은 값이 이긴다
+            }
         }
         env.put("APP_COLOR", target.name().toLowerCase());
         env.put("APP_VERSION", job.id());
