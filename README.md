@@ -70,7 +70,7 @@ OnPremPipeline
 
 본 모듈은 입구와 전환을 나눕니다. Tunnel은 프록시 포트에만 연결되고, 프록시는 활성 슬롯의 루프백 포트로만 요청을 전달합니다. 외부 주소는 그대로 두고 upstream만 바꿉니다. 클라우드 경로에서 Ingress는 유지한 채 Service Selector만 바꾸는 구조와 같은 역할입니다.
 
-프록시 upstream이 0이면 연결을 끊습니다. 첫 배포가 Ready가 되기 전에는 공개 주소로 들어온 요청이 앱에 도달하지 않습니다.
+프록시는 HTTP/1.1 리버스 프록시이며 요청마다 upstream을 정합니다. upstream이 0이면 503을 돌려줍니다. 첫 배포가 Ready가 되기 전에는 공개 주소로 들어온 요청이 앱에 도달하지 않습니다. 전환은 다음 요청부터 적용되고, 처리 중인 요청은 기존 슬롯에서 끝납니다. WebSocket(101) 이후는 바이트를 그대로 잇습니다.
 
 ### 플랫폼 존의 호스트이름에 TLS를 붙이는 이유
 
@@ -207,7 +207,7 @@ flowchart TD
 
 헬스 체크에 실패하면 후보 컨테이너를 삭제합니다.
 
-이 시점에는 프록시 upstream이 바뀌지 않았으므로 사용자 트래픽은 계속 기존 슬롯으로 전달됩니다. 첫 배포에서 Ready 이전에는 공개 주소로 들어온 연결이 프록시에서 끊깁니다.
+이 시점에는 프록시 upstream이 바뀌지 않았으므로 사용자 트래픽은 계속 기존 슬롯으로 전달됩니다. 첫 배포에서 Ready 이전에는 공개 주소로 들어온 요청에 프록시가 503을 돌려줍니다.
 
 체크아웃, Dockerfile 결정, 이미지 빌드에서 실패해도 프록시는 바꾸지 않습니다.
 
@@ -437,7 +437,7 @@ Ready가 된 뒤 upstream은 다시 `blue`가 됩니다.
 
 에이전트는 Docker와 Git이 있는 호스트에서 실행합니다. 에이전트를 컨테이너 안에서 실행하면 그 호스트의 Docker 소켓과 cloudflared에 직접 접근하지 못합니다.
 
-터널 없이 기동하면 이 머신의 프록시가 공개 주소입니다. 첫 배포가 성공하기 전에는 `8099`로 들어온 연결이 끊깁니다.
+터널 없이 기동하면 이 머신의 프록시가 공개 주소입니다. 첫 배포가 성공하기 전에는 `8099`로 들어온 요청에 503을 돌려줍니다.
 
 ```text
 java -jar app.jar
@@ -585,10 +585,10 @@ SPRING_PROFILES_ACTIVE=local
 
 ## 클라우드 버스팅
 
-온프레미스가 감당하지 못하는 연결을 클라우드(k3s)로 넘긴다. 공개 주소(Cloudflare)는 그대로이고, 에이전트 프록시 뒤에서 나눈다.
+온프레미스가 감당하지 못하는 요청을 클라우드(k3s)로 넘긴다. 공개 주소(Cloudflare)는 그대로이고, 에이전트 프록시 뒤에서 나눈다.
 
 ```
-사용자 → https://{app}.{zone} → Tunnel → 에이전트 프록시 ─┬─ 로컬 슬롯 (동시 연결 localLimit 까지)
+사용자 → https://{app}.{zone} → Tunnel → 에이전트 프록시 ─┬─ 로컬 슬롯 (처리 중 요청 localLimit 까지)
                                                           └─ 클라우드 Ingress → k3s Pod (넘칠 때)
 ```
 
@@ -596,12 +596,15 @@ SPRING_PROFILES_ACTIVE=local
 |---|---|---|
 | STANDBY | 온프레미스 배포 성공 | lily-builder `/api/burst` 로 같은 레포를 클라우드에 빌드·배포하고 레플리카 0 으로 대기. Ingress 호스트는 공개 주소와 같다 |
 | IDLE | 대기 완료 | 로컬만 처리 |
-| SCALING | 로컬 동시 연결이 한도 이상인 채로 `scaleUpAfterSeconds` 초 | 클라우드 레플리카 `replicas` 로 |
-| OVERFLOWING | 클라우드 Ready 1 이상 | 로컬이 한도에 닿으면 새 연결을 클라우드로 (TCP 그대로, Host 헤더 유지) |
+| SCALING | 로컬 처리 중 요청이 한도 이상인 채로 `scaleUpAfterSeconds` 초 | 클라우드 레플리카 `replicas` 로 |
+| OVERFLOWING | 클라우드 Ready 1 이상 | 로컬이 한도에 닿으면 그 요청을 클라우드로 (헤더 그대로, Host 유지) |
 | IDLE | `cooldownSeconds` 초 동안 한가 | 넘김 끄고 클라우드 0 |
 
-- 상태: `GET /api/burst` (단계, 로컬·클라우드 동시 연결, 최근 이벤트)
-- 이미 붙은 keep-alive 연결은 옮기지 않는다. 새 연결부터 나뉜다
+- 상태: `GET /api/burst` (단계, 로컬·클라우드 처리 중 요청, 최근 이벤트)
+- 요청 단위로 나눈다. cloudflared 는 keep-alive 연결 몇 개에 요청을 몰아 보내므로 연결 단위로는 분배를 정할 수 없다
+- 로컬 자리는 CAS 로 잡아 동시에 들어온 요청이 한도를 넘지 않는다
+- 클라우드에 붙지 못하면 그 요청은 로컬로 보낸다
+- WebSocket 은 연결이 끝날 때까지 처음 정한 쪽에 붙는다
 - 클라우드 빌드는 레포의 Dockerfile 을 쓴다 (에이전트가 만든 Dockerfile 은 클라우드로 가지 않는다)
 
 | 환경변수 | 기본값 | 설명 |
@@ -611,7 +614,7 @@ SPRING_PROFILES_ACTIVE=local
 | `BURST_API_TOKEN` | | lily-builder 의 `BURST_API_TOKEN` (k3s Secret `lily-system/lily-burst`) |
 | `BURST_INGRESS_HOST` / `BURST_INGRESS_PORT` | / `80` | 넘길 클라우드 Ingress |
 | `BURST_PUBLIC_HOST` | `{app}.{zone}` | 사용자가 여는 호스트. `{app}` 은 앱 이름 |
-| `BURST_LOCAL_LIMIT` | `8` | 로컬 슬롯 동시 연결 한도 |
+| `BURST_LOCAL_LIMIT` | `8` | 로컬 슬롯이 동시에 처리할 요청 수 |
 | `BURST_SCALE_UP_AFTER_SECONDS` | `3` | |
 | `BURST_COOLDOWN_SECONDS` | `30` | |
 | `BURST_REPLICAS` | `2` | DB 를 붙이면 (로컬 1 + 클라우드 N) x 풀 3 이 20 이하 |
