@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: lily-on-premise
+
+server:
+  # lily-blog-sample(8080), lily-cicd(8090), lily-builder(8070) 와 겹치지 않게
+  port: 8060
+
+lily:
+  agent:
+    # 비우면 프로세스마다 새로 만든다. 컨트롤 플레인이 에이전트를 알아보게 하려면 고정한다
+    id: ${AGENT_ID:}
+    # 비우면 소켓을 열지 않는다. 로컬에서는 POST /api/jobs 로 같은 파이프라인을 돌린다
+    control-plane-url: ${CONTROL_PLANE_URL:}
+    # 터널이 붙는 주소. 컨테이너 포트가 아니다. 트래픽 전환은 이 포트의 upstream 만 바꾼다
+    proxy-port: ${AGENT_PROXY_PORT:8099}
+    blue-port: ${AGENT_BLUE_PORT:18080}
+    green-port: ${AGENT_GREEN_PORT:18081}
+    health-timeout-seconds: ${AGENT_HEALTH_TIMEOUT_SECONDS:120}
+    # API 자격 없이 이미 만들어 둔 named tunnel 을 쓸 때의 고정 주소
+    public-url: ${PUBLIC_URL:}
+    workspace: ${AGENT_WORKSPACE:}
+    cloudflare:
+      enabled: ${CLOUDFLARE_ENABLED:false}
+      token: ${CLOUDFLARE_TUNNEL_TOKEN:}
+      # 네 값이 모두 있으면 https://{app}.{zone} 을 API 로 만든다. 토큰은 로그에 남기지 않는다
+      api-token: ${CLOUDFLARE_API_TOKEN:}
+      account-id: ${CLOUDFLARE_ACCOUNT_ID:}
+      zone-id: ${CLOUDFLARE_ZONE_ID:}
+      zone-name: ${CLOUDFLARE_ZONE_NAME:}
