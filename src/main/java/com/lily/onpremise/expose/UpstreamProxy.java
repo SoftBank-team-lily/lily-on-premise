@@ -12,10 +12,16 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 루프백에서만 듣는다. upstream 이 0 이면 연결을 끊어서, 준비되지 않은 슬롯으로 요청이 들어가지 않게 한다.
  * 이미 붙은 연결은 바꾸지 않고, 이후 연결만 새 포트로 간다.
+ *
+ * 클라우드 버스팅: 로컬 동시 연결이 {@link #localLimit} 에 닿은 상태에서 새 연결이 오면
+ * 넘김 대상({@link #overflowTo})이 켜져 있을 때 그 연결을 클라우드 Ingress 로 보낸다.
+ * TCP 그대로 넘기므로 Host 헤더는 공개 주소 그대로 가고, 클라우드 Ingress 가 같은 호스트로 받는다.
  */
 public final class UpstreamProxy implements AutoCloseable {
 
@@ -26,6 +32,13 @@ public final class UpstreamProxy implements AutoCloseable {
     private ServerSocketChannel server;
     private volatile int upstreamPort;
     private volatile boolean open;
+    private volatile int localLimit = Integer.MAX_VALUE;
+    private volatile InetSocketAddress overflow;
+    private final AtomicInteger localActive = new AtomicInteger();
+    private final AtomicInteger remoteActive = new AtomicInteger();
+    /** 로컬이 한도에 닿은 채로 들어온 연결 수 (누적). 버스팅 판단에 쓴다 */
+    private final AtomicLong saturated = new AtomicLong();
+    private final AtomicLong overflowed = new AtomicLong();
     private Thread acceptThread;
 
     public UpstreamProxy(int requestedPort) {
@@ -66,6 +79,37 @@ public final class UpstreamProxy implements AutoCloseable {
         return upstreamPort;
     }
 
+    /** 로컬 슬롯이 동시에 받을 연결 수. 넘치면 넘김 대상으로 보낸다 */
+    public void localLimit(int limit) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("local limit");
+        }
+        this.localLimit = limit;
+    }
+
+    public void overflowTo(InetSocketAddress target) {
+        this.overflow = target;
+    }
+
+    public void clearOverflow() {
+        this.overflow = null;
+    }
+
+    public boolean overflowing() {
+        return overflow != null;
+    }
+
+    public Pressure pressure() {
+        return new Pressure(localActive.get(), remoteActive.get(), localLimit, saturated.get(), overflowed.get());
+    }
+
+    /**
+     * @param saturatedTotal 로컬이 한도에 닿은 상태로 들어온 연결 누적
+     * @param overflowedTotal 클라우드로 넘긴 연결 누적
+     */
+    public record Pressure(int localActive, int remoteActive, int localLimit, long saturatedTotal, long overflowedTotal) {
+    }
+
     private void acceptLoop() {
         while (open) {
             try {
@@ -91,14 +135,30 @@ public final class UpstreamProxy implements AutoCloseable {
             closeQuietly(client);
             return;
         }
-        try (SocketChannel upstream = SocketChannel.open()) {
-            upstream.configureBlocking(false);
-            client.configureBlocking(false);
-            if (!upstream.connect(new InetSocketAddress(LOOPBACK, target))) {
-                while (!upstream.finishConnect()) {
-                    Thread.sleep(5);
-                }
+        InetSocketAddress remote = overflow;
+        boolean full = localActive.get() >= localLimit;
+        if (full) {
+            saturated.incrementAndGet();
+        }
+        SocketChannel upstream = null;
+        AtomicInteger counter = localActive;
+        if (full && remote != null) {
+            upstream = connect(remote);
+            if (upstream != null) {
+                counter = remoteActive;
+                overflowed.incrementAndGet();
             }
+        }
+        counter.incrementAndGet();
+        try {
+            if (upstream == null) {
+                // 넘김이 꺼져 있거나 클라우드 연결 실패: 로컬로 보낸다
+                upstream = connect(new InetSocketAddress(LOOPBACK, target));
+            }
+            if (upstream == null) {
+                return;
+            }
+            client.configureBlocking(false);
             try (Selector selector = Selector.open()) {
                 client.register(selector, SelectionKey.OP_READ);
                 upstream.register(selector, SelectionKey.OP_READ);
@@ -138,13 +198,42 @@ public final class UpstreamProxy implements AutoCloseable {
                     }
                 }
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         } catch (IOException e) {
             log.debug("proxy bridge closed: {}", e.getMessage());
         } finally {
+            counter.decrementAndGet();
+            if (upstream != null) {
+                closeQuietly(upstream);
+            }
             closeQuietly(client);
         }
+    }
+
+    /** 3초 안에 붙지 못하면 null */
+    private static SocketChannel connect(InetSocketAddress address) {
+        SocketChannel channel = null;
+        try {
+            channel = SocketChannel.open();
+            channel.configureBlocking(false);
+            if (!channel.connect(address)) {
+                long deadline = System.nanoTime() + 3_000_000_000L;
+                while (!channel.finishConnect()) {
+                    if (System.nanoTime() > deadline) {
+                        throw new IOException("connect timeout");
+                    }
+                    Thread.sleep(5);
+                }
+            }
+            return channel;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException e) {
+            log.warn("proxy connect failed: {} {}", address, e.getMessage());
+        }
+        if (channel != null) {
+            closeQuietly(channel);
+        }
+        return null;
     }
 
     @Override

@@ -65,6 +65,11 @@ public final class LocalExposure implements TrafficSwitch, AutoCloseable {
         return proxy.port();
     }
 
+    /** 클라우드 버스팅이 연결 수를 보고 넘김 대상을 켜고 끈다 */
+    public UpstreamProxy proxy() {
+        return proxy;
+    }
+
     @Override
     public void route(int upstreamPort) {
         proxy.switchTo(upstreamPort);
