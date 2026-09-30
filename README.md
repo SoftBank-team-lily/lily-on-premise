@@ -580,3 +580,41 @@ SPRING_PROFILES_ACTIVE=local
 | 실행            | `./gradlew test`           |
 
 테스트는 Docker, cloudflared, 컨트롤 플레인에 연결하지 않은 상태에서 슬롯 선택과 트래픽 전환 순서만 확인합니다.
+
+---
+
+## 클라우드 버스팅
+
+온프레미스가 감당하지 못하는 연결을 클라우드(k3s)로 넘긴다. 공개 주소(Cloudflare)는 그대로이고, 에이전트 프록시 뒤에서 나눈다.
+
+```
+사용자 → https://{app}.{zone} → Tunnel → 에이전트 프록시 ─┬─ 로컬 슬롯 (동시 연결 localLimit 까지)
+                                                          └─ 클라우드 Ingress → k3s Pod (넘칠 때)
+```
+
+| 단계 | 조건 | 동작 |
+|---|---|---|
+| STANDBY | 온프레미스 배포 성공 | lily-builder `/api/burst` 로 같은 레포를 클라우드에 빌드·배포하고 레플리카 0 으로 대기. Ingress 호스트는 공개 주소와 같다 |
+| IDLE | 대기 완료 | 로컬만 처리 |
+| SCALING | 로컬 동시 연결이 한도 이상인 채로 `scaleUpAfterSeconds` 초 | 클라우드 레플리카 `replicas` 로 |
+| OVERFLOWING | 클라우드 Ready 1 이상 | 로컬이 한도에 닿으면 새 연결을 클라우드로 (TCP 그대로, Host 헤더 유지) |
+| IDLE | `cooldownSeconds` 초 동안 한가 | 넘김 끄고 클라우드 0 |
+
+- 상태: `GET /api/burst` (단계, 로컬·클라우드 동시 연결, 최근 이벤트)
+- 이미 붙은 keep-alive 연결은 옮기지 않는다. 새 연결부터 나뉜다
+- 클라우드 빌드는 레포의 Dockerfile 을 쓴다 (에이전트가 만든 Dockerfile 은 클라우드로 가지 않는다)
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `BURST_ENABLED` | `false` | |
+| `BURST_BUILDER_URL` | | lily-builder 공개 주소. 예: `http://builder.43.200.152.53.nip.io` |
+| `BURST_API_TOKEN` | | lily-builder 의 `BURST_API_TOKEN` (k3s Secret `lily-system/lily-burst`) |
+| `BURST_INGRESS_HOST` / `BURST_INGRESS_PORT` | / `80` | 넘길 클라우드 Ingress |
+| `BURST_PUBLIC_HOST` | `{app}.{zone}` | 사용자가 여는 호스트. `{app}` 은 앱 이름 |
+| `BURST_LOCAL_LIMIT` | `8` | 로컬 슬롯 동시 연결 한도 |
+| `BURST_SCALE_UP_AFTER_SECONDS` | `3` | |
+| `BURST_COOLDOWN_SECONDS` | `30` | |
+| `BURST_REPLICAS` | `2` | DB 를 붙이면 (로컬 1 + 클라우드 N) x 풀 3 이 20 이하 |
+| `BURST_DATABASE` | | 클라우드 대기 배포에 붙일 DB (`postgres` / `mysql`) |
+
+검증 (2026-09-30): 로컬 한도 4, 동시 16 연결로 60초 부하 → 3초 뒤 클라우드 2 Pod 로 스케일, 약 16초 뒤 넘김 시작, 부하 종료 20초 뒤 0 으로. 2,822 요청 모두 200.

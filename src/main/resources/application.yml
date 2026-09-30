@@ -28,3 +28,17 @@ lily:
       account-id: ${CLOUDFLARE_ACCOUNT_ID:}
       zone-id: ${CLOUDFLARE_ZONE_ID:}
       zone-name: ${CLOUDFLARE_ZONE_NAME:}
+    # 클라우드 버스팅: 로컬이 한도를 넘으면 넘치는 연결을 클라우드 Ingress 로 보낸다. 상태는 GET /api/burst
+    burst:
+      enabled: ${BURST_ENABLED:false}
+      builder-url: ${BURST_BUILDER_URL:}
+      token: ${BURST_API_TOKEN:}
+      ingress-host: ${BURST_INGRESS_HOST:}
+      ingress-port: ${BURST_INGRESS_PORT:80}
+      # {app} 은 앱 이름. 비우면 {app}.{zone}
+      public-host: ${BURST_PUBLIC_HOST:}
+      local-limit: ${BURST_LOCAL_LIMIT:8}
+      scale-up-after-seconds: ${BURST_SCALE_UP_AFTER_SECONDS:3}
+      cooldown-seconds: ${BURST_COOLDOWN_SECONDS:30}
+      replicas: ${BURST_REPLICAS:2}
+      database: ${BURST_DATABASE:}

@@ -1,5 +1,6 @@
 package com.lily.onpremise;
 
+import com.lily.onpremise.burst.CloudBurst;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobRecord;
 import com.lily.onpremise.job.JobStore;
@@ -23,13 +24,16 @@ public class AgentService implements JobSink {
     private final OnPremPipeline pipeline;
     private final ControlSession session;
     private final JobRunner runner;
+    private final CloudBurst burst;
     private final Object gate = new Object();
 
-    public AgentService(JobStore store, OnPremPipeline pipeline, ControlSession session, JobRunner runner) {
+    public AgentService(JobStore store, OnPremPipeline pipeline, ControlSession session, JobRunner runner,
+                        CloudBurst burst) {
         this.store = store;
         this.pipeline = pipeline;
         this.session = session;
         this.runner = runner;
+        this.burst = burst;
     }
 
     @Override
@@ -44,6 +48,10 @@ public class AgentService implements JobSink {
         runner.run(() -> {
             synchronized (gate) {
                 pipeline.execute(record, job, this::publish);
+            }
+            if (record.getStatus() == JobRecord.Status.SUCCEEDED) {
+                // 클라우드 버스팅이 켜져 있으면 같은 앱을 클라우드에 대기 배포한다
+                burst.onDeployed(job);
             }
         });
         return record;
