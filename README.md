@@ -618,3 +618,29 @@ SPRING_PROFILES_ACTIVE=local
 | `BURST_DATABASE` | | 클라우드 대기 배포에 붙일 DB (`postgres` / `mysql`) |
 
 검증 (2026-09-30): 로컬 한도 4, 동시 16 연결로 60초 부하 → 3초 뒤 클라우드 2 Pod 로 스케일, 약 16초 뒤 넘김 시작, 부하 종료 20초 뒤 0 으로. 2,822 요청 모두 200.
+
+### DB 공유 (클라우드와 같은 RDS)
+
+배포 요청에 `"database": "postgres"` 를 넣으면 온프레미스 앱과 클라우드 대기 배포가 **같은 DB** 를 쓴다.
+
+```
+에이전트 ── ssh -L 172.17.0.1:15432 → lily-server(lily-tunnel, RDS:5432 포워딩만) → RDS
+   └ lily-builder /api/burst/apps/{app}/database → 프로비저너: DB 찾기/만들기, 터널 주소로 접속 정보
+```
+
+- projectId = appName 이라 lily-cicd 의 클라우드 배포도 같은 DB 를 받는다
+- 터널은 Docker 브리지 게이트웨이(172.17.0.1)에만 열린다. 컨테이너에서만 닿고 LAN 에는 노출되지 않는다
+- 배스천 계정은 lily-db-provisioner 의 `deploy/k3s/cluster/db-tunnel-user.sh` 로 만든다 (셸 없음, RDS:5432 포워딩만)
+- 커넥션: 온프레미스 슬롯 최대 2 + 클라우드 `BURST_REPLICAS`, 각 풀 3 → 20 이하
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `DB_TUNNEL_SSH_HOST` | | 배스천 (lily-server 공개 IP) |
+| `DB_TUNNEL_SSH_USER` | `lily-tunnel` | |
+| `DB_TUNNEL_SSH_KEY` | | 개인키 경로 (권한 600) |
+| `DB_TUNNEL_REMOTE_HOST` / `_PORT` | / `5432` | RDS 엔드포인트 |
+| `DB_TUNNEL_BIND_HOST` / `_PORT` | `172.17.0.1` / `15432` | |
+
+DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를 거쳐 받는다).
+
+검증 (2026-09-30): 온프레미스에서 쓴 글을 버스팅된 클라우드 Pod 가 읽고, 클라우드 Pod 에 쓴 글을 스케일 다운 뒤 온프레미스에서 읽음.

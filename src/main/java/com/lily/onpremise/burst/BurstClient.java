@@ -59,6 +59,15 @@ public class BurstClient {
         return new AppState(node.path("replicas").asInt(), node.path("readyReplicas").asInt());
     }
 
+    /** 클라우드와 같은 DB 의 접속 정보를 host:port(터널) 기준으로 받는다 */
+    public Map<String, String> database(String appName, String engine, String host, int port) {
+        JsonNode node = send("POST", "/api/burst/apps/" + appName + "/database",
+                Map.of("engine", engine, "host", host, "port", port));
+        Map<String, String> env = new LinkedHashMap<>();
+        node.path("env").fields().forEachRemaining(e -> env.put(e.getKey(), e.getValue().asText()));
+        return env;
+    }
+
     public AppState scale(String appName, int replicas) {
         JsonNode node = send("PUT", "/api/burst/apps/" + appName + "/replicas", Map.of("replicas", replicas));
         return new AppState(node.path("replicas").asInt(), node.path("readyReplicas").asInt());
