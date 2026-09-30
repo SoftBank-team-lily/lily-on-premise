@@ -3,43 +3,61 @@ package com.lily.onpremise.expose;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.EOFException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
-import java.util.Iterator;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 루프백에서만 듣는다. upstream 이 0 이면 연결을 끊어서, 준비되지 않은 슬롯으로 요청이 들어가지 않게 한다.
- * 이미 붙은 연결은 바꾸지 않고, 이후 연결만 새 포트로 간다.
+ * 루프백에서만 듣는 HTTP/1.1 리버스 프록시. 요청마다 보낼 곳을 정한다.
  *
- * 클라우드 버스팅: 로컬 동시 연결이 {@link #localLimit} 에 닿은 상태에서 새 연결이 오면
- * 넘김 대상({@link #overflowTo})이 켜져 있을 때 그 연결을 클라우드 Ingress 로 보낸다.
- * TCP 그대로 넘기므로 Host 헤더는 공개 주소 그대로 가고, 클라우드 Ingress 가 같은 호스트로 받는다.
+ * <ul>
+ *   <li>upstream 이 0 이면 503 을 돌려주어, 준비되지 않은 슬롯으로 요청이 들어가지 않게 한다</li>
+ *   <li>블루/그린 전환은 다음 요청부터 새 포트로 간다. 처리 중인 요청은 끝까지 기존 포트에서 처리한다</li>
+ *   <li>클라우드 버스팅: 로컬에서 처리 중인 요청이 {@link #localLimit} 이면, 넘김 대상({@link #overflowTo})이
+ *       켜져 있을 때 그 요청을 클라우드 Ingress 로 보낸다. 헤더는 그대로 넘기므로 Host 는 공개 주소다</li>
+ * </ul>
+ *
+ * 앞단(cloudflared)은 keep-alive 로 연결 몇 개에 요청을 몰아 보내므로, 연결 단위로 나누면 분배를 정할 수 없다.
+ * 그래서 요청 단위로 나눈다. 101 Switching Protocols(WebSocket) 이후는 바이트를 그대로 잇는다.
  */
 public final class UpstreamProxy implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(UpstreamProxy.class);
     private static final InetAddress LOOPBACK = ipv4Loopback();
+    /** 앞단의 keep-alive(cloudflared 90초)보다 길게 잡아 앞단이 먼저 닫게 한다 */
+    private static final int CLIENT_IDLE_MILLIS = 120_000;
+    private static final int CONNECT_TIMEOUT_MILLIS = 3_000;
+    /** 이보다 오래 쉰 업스트림 연결은 재사용하지 않는다 (Node 기본 keep-alive 5초보다 짧게) */
+    private static final long UPSTREAM_REUSE_NANOS = 3_000_000_000L;
+    /** 끊긴 keep-alive 연결로 보냈을 때 다시 보내도 되는 메서드 */
+    private static final Set<String> REPLAYABLE = Set.of("GET", "HEAD", "OPTIONS");
+    private static final Set<Integer> GATEWAY_ERRORS = Set.of(502, 503, 504);
 
     private final int requestedPort;
-    private ServerSocketChannel server;
+    private ServerSocket server;
     private volatile int upstreamPort;
     private volatile boolean open;
     private volatile int localLimit = Integer.MAX_VALUE;
     private volatile InetSocketAddress overflow;
-    private volatile long remoteIdleNanos = Long.MAX_VALUE;
+    /** 로컬 / 클라우드에서 처리 중인 요청 수 */
     private final AtomicInteger localActive = new AtomicInteger();
     private final AtomicInteger remoteActive = new AtomicInteger();
-    /** 로컬이 한도에 닿은 채로 들어온 연결 수 (누적). 버스팅 판단에 쓴다 */
+    /** 로컬이 한도에 닿은 채로 들어온 요청 수 (누적). 버스팅 판단에 쓴다 */
     private final AtomicLong saturated = new AtomicLong();
     private final AtomicLong overflowed = new AtomicLong();
+    /** 클라우드가 게이트웨이 오류를 돌려주어 로컬이 다시 처리한 요청 수 (누적) */
+    private final AtomicLong fallback = new AtomicLong();
     private Thread acceptThread;
 
     public UpstreamProxy(int requestedPort) {
@@ -51,8 +69,8 @@ public final class UpstreamProxy implements AutoCloseable {
             return;
         }
         try {
-            server = ServerSocketChannel.open();
-            server.bind(new InetSocketAddress(LOOPBACK, requestedPort), 50);
+            server = new ServerSocket();
+            server.bind(new InetSocketAddress(LOOPBACK, requestedPort), 200);
         } catch (IOException e) {
             throw new IllegalStateException("proxy 포트를 열지 못했습니다: " + requestedPort, e);
         }
@@ -63,7 +81,7 @@ public final class UpstreamProxy implements AutoCloseable {
 
     public int port() {
         try {
-            return server.socket().getLocalPort();
+            return server.getLocalPort();
         } catch (RuntimeException e) {
             throw new IllegalStateException("proxy 가 아직 없습니다", e);
         }
@@ -80,25 +98,12 @@ public final class UpstreamProxy implements AutoCloseable {
         return upstreamPort;
     }
 
-    /** 로컬 슬롯이 동시에 받을 연결 수. 넘치면 넘김 대상으로 보낸다 */
+    /** 로컬 슬롯이 동시에 처리할 요청 수. 넘치면 넘김 대상으로 보낸다 */
     public void localLimit(int limit) {
         if (limit < 1) {
             throw new IllegalArgumentException("local limit");
         }
         this.localLimit = limit;
-    }
-
-    /**
-     * 클라우드로 넘긴 연결이 응답을 끝내고 이 시간 동안 조용하면 닫는다.
-     * 앞단(cloudflared)은 keep-alive 로 연결을 풀에 붙잡고 재사용하므로, 닫지 않으면 부하가 끝나도
-     * 요청이 계속 클라우드로 가고 remoteActive 가 0 이 되지 않아 스케일 다운도 되지 않는다.
-     * 닫힌 뒤 앞단이 새로 여는 연결은 로컬에 자리가 있으면 로컬로 간다.
-     */
-    public void remoteIdle(int seconds) {
-        if (seconds < 1) {
-            throw new IllegalArgumentException("remote idle");
-        }
-        this.remoteIdleNanos = seconds * 1_000_000_000L;
     }
 
     public void overflowTo(InetSocketAddress target) {
@@ -114,23 +119,26 @@ public final class UpstreamProxy implements AutoCloseable {
     }
 
     public Pressure pressure() {
-        return new Pressure(localActive.get(), remoteActive.get(), localLimit, saturated.get(), overflowed.get());
+        return new Pressure(localActive.get(), remoteActive.get(), localLimit, saturated.get(), overflowed.get(),
+                fallback.get());
     }
 
     /**
-     * @param saturatedTotal 로컬이 한도에 닿은 상태로 들어온 연결 누적
-     * @param overflowedTotal 클라우드로 넘긴 연결 누적
+     * @param localActive     로컬에서 처리 중인 요청
+     * @param remoteActive    클라우드에서 처리 중인 요청
+     * @param saturatedTotal  로컬이 한도에 닿은 상태로 들어온 요청 누적
+     * @param overflowedTotal 클라우드로 넘긴 요청 누적
+     * @param fallbackTotal   클라우드가 502/503/504 를 돌려주어 로컬이 다시 처리한 요청 누적
      */
-    public record Pressure(int localActive, int remoteActive, int localLimit, long saturatedTotal, long overflowedTotal) {
+    public record Pressure(int localActive, int remoteActive, int localLimit, long saturatedTotal, long overflowedTotal,
+                           long fallbackTotal) {
     }
 
     private void acceptLoop() {
         while (open) {
             try {
-                SocketChannel client = server.accept();
-                if (client != null) {
-                    Thread.ofPlatform().daemon(true).name("lily-proxy-conn").start(() -> bridge(client));
-                }
+                Socket client = server.accept();
+                Thread.ofVirtual().name("lily-proxy-conn").start(() -> serve(client));
             } catch (IOException e) {
                 if (open) {
                     log.warn("proxy accept failed: {}", e.getMessage());
@@ -139,128 +147,388 @@ public final class UpstreamProxy implements AutoCloseable {
         }
     }
 
-    /**
-     * 한 채널을 두 스레드가 동시에 읽고 쓰면, 이 JDK 에서는 응답 쓰기가 요청 읽기에 막힌다.
-     * 연결마다 스레드 하나에서만 읽고 쓴다.
-     */
-    private void bridge(SocketChannel client) {
-        int target = upstreamPort;
-        if (target == 0) {
-            closeQuietly(client);
-            return;
-        }
-        InetSocketAddress remote = overflow;
-        boolean full = localActive.get() >= localLimit;
-        if (full) {
-            saturated.incrementAndGet();
-        }
-        SocketChannel upstream = null;
-        AtomicInteger counter = localActive;
-        if (full && remote != null) {
-            upstream = connect(remote);
-            if (upstream != null) {
-                counter = remoteActive;
-                overflowed.incrementAndGet();
-            }
-        }
-        boolean toCloud = counter == remoteActive;
-        counter.incrementAndGet();
-        try {
-            if (upstream == null) {
-                // 넘김이 꺼져 있거나 클라우드 연결 실패: 로컬로 보낸다
-                upstream = connect(new InetSocketAddress(LOOPBACK, target));
-            }
-            if (upstream == null) {
-                return;
-            }
-            client.configureBlocking(false);
-            try (Selector selector = Selector.open()) {
-                client.register(selector, SelectionKey.OP_READ);
-                upstream.register(selector, SelectionKey.OP_READ);
-                ByteBuffer fromClient = ByteBuffer.allocate(8192);
-                ByteBuffer fromUpstream = ByteBuffer.allocate(8192);
-                boolean clientDone = false;
-                boolean upstreamDone = false;
-                // 요청을 보냈고 아직 응답 바이트가 오지 않았으면 닫지 않는다 (느린 응답을 끊지 않게)
-                boolean awaitingResponse = false;
-                long lastActivity = System.nanoTime();
-                while (!clientDone || !upstreamDone) {
-                    selector.select(250);
-                    if (toCloud && !awaitingResponse
-                            && (overflow == null || System.nanoTime() - lastActivity >= remoteIdleNanos)) {
-                        // 응답을 끝낸 유휴 keep-alive 연결: 앞단이 다음 요청을 새 연결로 보내게 닫는다
-                        break;
-                    }
-                    Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
-                    while (keys.hasNext()) {
-                        SelectionKey key = keys.next();
-                        keys.remove();
-                        if (!key.isReadable()) {
-                            continue;
-                        }
-                        SocketChannel from = (SocketChannel) key.channel();
-                        boolean inbound = from == client;
-                        SocketChannel to = inbound ? upstream : client;
-                        ByteBuffer buffer = inbound ? fromClient : fromUpstream;
-                        int read = from.read(buffer);
-                        if (read < 0) {
-                            to.shutdownOutput();
-                            key.cancel();
-                            if (inbound) {
-                                clientDone = true;
-                            } else {
-                                upstreamDone = true;
-                            }
-                            continue;
-                        }
-                        if (read > 0) {
-                            lastActivity = System.nanoTime();
-                            awaitingResponse = inbound;
-                        }
-                        buffer.flip();
-                        while (buffer.hasRemaining()) {
-                            to.write(buffer);
-                        }
-                        buffer.clear();
-                    }
+    /** 한 클라이언트 연결에서 요청을 차례로 처리한다. 업스트림 연결은 대상별로 하나씩 재사용한다 */
+    private void serve(Socket client) {
+        Upstreams upstreams = new Upstreams();
+        try (client) {
+            client.setSoTimeout(CLIENT_IDLE_MILLIS);
+            client.setTcpNoDelay(true);
+            InputStream in = new BufferedInputStream(client.getInputStream());
+            OutputStream out = new BufferedOutputStream(client.getOutputStream());
+            while (open) {
+                HttpHead request = HttpHead.read(in);
+                if (request == null) {
+                    return;
+                }
+                int port = upstreamPort;
+                if (port == 0) {
+                    reply(out, 503, "no upstream");
+                    return;
+                }
+                Slot slot = acquire();
+                boolean keep;
+                try {
+                    keep = exchange(client, request, in, out, port, slot, upstreams);
+                } finally {
+                    slot.release();
+                }
+                if (!keep) {
+                    return;
                 }
             }
         } catch (IOException e) {
-            log.debug("proxy bridge closed: {}", e.getMessage());
+            log.debug("proxy connection closed: {}", e.getMessage());
         } finally {
-            counter.decrementAndGet();
-            if (upstream != null) {
-                closeQuietly(upstream);
-            }
-            closeQuietly(client);
+            upstreams.close();
         }
     }
 
-    /** 3초 안에 붙지 못하면 null */
-    private static SocketChannel connect(InetSocketAddress address) {
-        SocketChannel channel = null;
-        try {
-            channel = SocketChannel.open();
-            channel.configureBlocking(false);
-            if (!channel.connect(address)) {
-                long deadline = System.nanoTime() + 3_000_000_000L;
-                while (!channel.finishConnect()) {
-                    if (System.nanoTime() > deadline) {
-                        throw new IOException("connect timeout");
-                    }
-                    Thread.sleep(5);
-                }
+    /**
+     * 요청 하나를 보내고 응답을 돌려준다.
+     *
+     * @return 같은 클라이언트 연결로 다음 요청을 받을 수 있으면 true
+     */
+    private boolean exchange(Socket client, HttpHead request, InputStream in, OutputStream out,
+                             int port, Slot slot, Upstreams upstreams) throws IOException {
+        InetSocketAddress local = new InetSocketAddress(LOOPBACK, port);
+        Upstream upstream = slot.remote != null ? upstreams.get(slot.remote) : null;
+        if (slot.remote != null && upstream == null) {
+            // 클라우드에 붙지 못하면 로컬로 보낸다
+            slot.fallBackToLocal();
+        }
+        if (upstream == null) {
+            upstream = upstreams.get(local);
+        }
+        if (upstream == null) {
+            reply(out, 502, "upstream unavailable");
+            return false;
+        }
+
+        HttpHead response = send(request, in, upstream);
+        if (response == null && upstream.reused && !request.hasRequestBody()
+                && REPLAYABLE.contains(request.method())) {
+            // 업스트림이 keep-alive 연결을 먼저 닫았다. 새 연결로 한 번 더 보낸다
+            upstreams.drop(upstream);
+            upstream = upstreams.connectFresh(upstream.address);
+            response = upstream == null ? null : send(request, in, upstream);
+        }
+        if (response == null) {
+            if (upstream != null) {
+                upstreams.drop(upstream);
             }
-            return channel;
+            reply(out, 502, "upstream closed");
+            return false;
+        }
+
+        if (slot.remote != null && GATEWAY_ERRORS.contains(response.status())
+                && !request.hasRequestBody() && REPLAYABLE.contains(request.method())) {
+            // 클라우드 Ingress 가 아직 Pod 로 보내지 못한다 (엔드포인트 반영 지연 등). 이 요청은 로컬이 처리한다
+            upstreams.drop(upstream);
+            slot.fallBackToLocal();
+            fallback.incrementAndGet();
+            upstream = upstreams.get(local);
+            response = upstream == null ? null : send(request, in, upstream);
+            if (response == null) {
+                if (upstream != null) {
+                    upstreams.drop(upstream);
+                }
+                reply(out, 502, "upstream unavailable");
+                return false;
+            }
+        }
+
+        // 100 Continue 같은 중간 응답은 그대로 전달하고 최종 응답을 기다린다
+        while (response.status() >= 100 && response.status() < 200 && response.status() != 101) {
+            response.writeTo(out);
+            out.flush();
+            response = HttpHead.read(upstream.in);
+            if (response == null) {
+                upstreams.drop(upstream);
+                return false;
+            }
+        }
+        response.writeTo(out);
+
+        if (response.status() == 101) {
+            out.flush();
+            tunnel(client, in, out, upstream);
+            upstreams.drop(upstream);
+            return false;
+        }
+
+        boolean untilClose = copyResponseBody(request, response, upstream.in, out);
+        out.flush();
+        boolean keep = !untilClose && request.keepAlive(false) && response.keepAlive(true);
+        if (keep) {
+            upstream.lastUsed = System.nanoTime();
+            upstream.reused = true;
+        } else {
+            upstreams.drop(upstream);
+        }
+        return keep;
+    }
+
+    /** 요청 헤더와 본문을 보내고 응답 헤더를 읽는다. 업스트림이 이미 닫혀 있었으면 null */
+    private static HttpHead send(HttpHead request, InputStream in, Upstream upstream) {
+        try {
+            request.writeTo(upstream.out);
+            if (request.chunked()) {
+                copyChunked(in, upstream.out, false);
+            } else if (request.contentLength() > 0) {
+                copyExactly(in, upstream.out, request.contentLength(), false);
+            }
+            upstream.out.flush();
+            return HttpHead.read(upstream.in);
+        } catch (IOException e) {
+            log.debug("upstream exchange failed: {} {}", upstream.address, e.getMessage());
+            return null;
+        }
+    }
+
+    /** @return 본문 길이를 알 수 없어 업스트림이 닫을 때까지 읽었으면 true */
+    private static boolean copyResponseBody(HttpHead request, HttpHead response, InputStream from, OutputStream to)
+            throws IOException {
+        int status = response.status();
+        if ("HEAD".equalsIgnoreCase(request.method()) || status == 204 || status == 304) {
+            return false;
+        }
+        if (response.chunked()) {
+            copyChunked(from, to, true);
+            return false;
+        }
+        long length = response.contentLength();
+        if (length >= 0) {
+            copyExactly(from, to, length, true);
+            return false;
+        }
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = from.read(buffer)) >= 0) {
+            to.write(buffer, 0, read);
+            to.flush();
+        }
+        return true;
+    }
+
+    /** flush 가 true 면 읽은 만큼 바로 내보낸다 (스트리밍 응답이 모이지 않게) */
+    private static void copyExactly(InputStream from, OutputStream to, long length, boolean flush) throws IOException {
+        byte[] buffer = new byte[8192];
+        long left = length;
+        while (left > 0) {
+            int read = from.read(buffer, 0, (int) Math.min(buffer.length, left));
+            if (read < 0) {
+                throw new EOFException("본문 도중 연결 종료");
+            }
+            to.write(buffer, 0, read);
+            if (flush) {
+                to.flush();
+            }
+            left -= read;
+        }
+    }
+
+    /** chunked 본문을 크기 줄까지 그대로 옮긴다 */
+    private static void copyChunked(InputStream from, OutputStream to, boolean flush) throws IOException {
+        while (true) {
+            String sizeLine = HttpHead.readLine(from);
+            if (sizeLine == null) {
+                throw new EOFException("chunk 도중 연결 종료");
+            }
+            writeLine(to, sizeLine);
+            int semicolon = sizeLine.indexOf(';');
+            String hex = (semicolon < 0 ? sizeLine : sizeLine.substring(0, semicolon)).trim();
+            long size;
+            try {
+                size = Long.parseLong(hex, 16);
+            } catch (NumberFormatException e) {
+                throw new IOException("잘못된 chunk 크기: " + hex);
+            }
+            if (size == 0) {
+                // 트레일러와 마지막 빈 줄
+                String trailer;
+                do {
+                    trailer = HttpHead.readLine(from);
+                    if (trailer == null) {
+                        throw new EOFException("chunk 트레일러 도중 연결 종료");
+                    }
+                    writeLine(to, trailer);
+                } while (!trailer.isEmpty());
+                if (flush) {
+                    to.flush();
+                }
+                return;
+            }
+            copyExactly(from, to, size, false);
+            String end = HttpHead.readLine(from);
+            if (end == null) {
+                throw new EOFException("chunk 끝 도중 연결 종료");
+            }
+            writeLine(to, end);
+            if (flush) {
+                to.flush();
+            }
+        }
+    }
+
+    /** 101 이후: 양방향으로 바이트를 그대로 잇는다. 한쪽이 끝나면 반대쪽 쓰기를 닫는다 */
+    private static void tunnel(Socket client, InputStream in, OutputStream out, Upstream upstream) throws IOException {
+        client.setSoTimeout(0);
+        Thread up = Thread.ofVirtual().name("lily-proxy-ws").start(() -> {
+            pump(in, upstream.out);
+            shutdownOutput(upstream.socket);
+        });
+        pump(upstream.in, out);
+        shutdownOutput(client);
+        try {
+            up.join();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void pump(InputStream from, OutputStream to) {
+        byte[] buffer = new byte[8192];
+        try {
+            int read;
+            while ((read = from.read(buffer)) >= 0) {
+                to.write(buffer, 0, read);
+                to.flush();
+            }
         } catch (IOException e) {
-            log.warn("proxy connect failed: {} {}", address, e.getMessage());
+            log.debug("tunnel closed: {}", e.getMessage());
         }
-        if (channel != null) {
-            closeQuietly(channel);
+    }
+
+    private static void writeLine(OutputStream to, String line) throws IOException {
+        to.write((line + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
+    }
+
+    private static void reply(OutputStream out, int status, String message) throws IOException {
+        byte[] body = message.getBytes(StandardCharsets.UTF_8);
+        String head = "HTTP/1.1 " + status + " " + message + "\r\nContent-Type: text/plain\r\nContent-Length: "
+                + body.length + "\r\nConnection: close\r\n\r\n";
+        out.write(head.getBytes(StandardCharsets.ISO_8859_1));
+        out.write(body);
+        out.flush();
+    }
+
+    /**
+     * 로컬 자리를 원자적으로 잡는다. 자리가 없으면 넘김 대상이 켜져 있을 때 클라우드로,
+     * 꺼져 있으면 한도를 넘더라도 로컬로 보낸다.
+     */
+    private Slot acquire() {
+        int limit = localLimit;
+        while (true) {
+            int current = localActive.get();
+            if (current >= limit) {
+                break;
+            }
+            if (localActive.compareAndSet(current, current + 1)) {
+                return new Slot(null);
+            }
         }
-        return null;
+        saturated.incrementAndGet();
+        InetSocketAddress remote = overflow;
+        if (remote != null) {
+            remoteActive.incrementAndGet();
+            overflowed.incrementAndGet();
+            return new Slot(remote);
+        }
+        localActive.incrementAndGet();
+        return new Slot(null);
+    }
+
+    /** 요청 하나가 차지한 자리. remote 가 null 이면 로컬 */
+    private final class Slot {
+        private InetSocketAddress remote;
+
+        private Slot(InetSocketAddress remote) {
+            this.remote = remote;
+        }
+
+        void fallBackToLocal() {
+            remote = null;
+            remoteActive.decrementAndGet();
+            localActive.incrementAndGet();
+        }
+
+        void release() {
+            (remote != null ? remoteActive : localActive).decrementAndGet();
+        }
+    }
+
+    private static final class Upstream {
+        final InetSocketAddress address;
+        final Socket socket;
+        final InputStream in;
+        final OutputStream out;
+        long lastUsed = System.nanoTime();
+        boolean reused;
+
+        Upstream(InetSocketAddress address, Socket socket) throws IOException {
+            this.address = address;
+            this.socket = socket;
+            this.in = new BufferedInputStream(socket.getInputStream());
+            this.out = new BufferedOutputStream(socket.getOutputStream());
+        }
+    }
+
+    /** 클라이언트 연결 하나가 쓰는 업스트림 연결. 로컬 한 개, 클라우드 한 개 정도다 */
+    private static final class Upstreams {
+        private Upstream local;
+        private Upstream remote;
+
+        /** 쉬던 시간이 짧으면 재사용하고, 아니면 새로 붙는다. 붙지 못하면 null */
+        Upstream get(InetSocketAddress address) {
+            boolean loopback = address.getAddress() != null && address.getAddress().isLoopbackAddress();
+            Upstream cached = loopback ? local : remote;
+            if (cached != null && cached.address.equals(address)
+                    && System.nanoTime() - cached.lastUsed < UPSTREAM_REUSE_NANOS) {
+                return cached;
+            }
+            if (cached != null) {
+                drop(cached);
+            }
+            return connectFresh(address);
+        }
+
+        Upstream connectFresh(InetSocketAddress address) {
+            Socket socket = new Socket();
+            try {
+                socket.connect(address, CONNECT_TIMEOUT_MILLIS);
+                socket.setTcpNoDelay(true);
+                Upstream upstream = new Upstream(address, socket);
+                if (address.getAddress() != null && address.getAddress().isLoopbackAddress()) {
+                    local = upstream;
+                } else {
+                    remote = upstream;
+                }
+                return upstream;
+            } catch (IOException e) {
+                log.warn("proxy connect failed: {} {}", address, e.getMessage());
+                closeQuietly(socket);
+                return null;
+            }
+        }
+
+        void drop(Upstream upstream) {
+            closeQuietly(upstream.socket);
+            if (local == upstream) {
+                local = null;
+            }
+            if (remote == upstream) {
+                remote = null;
+            }
+        }
+
+        void close() {
+            if (local != null) {
+                drop(local);
+            }
+            if (remote != null) {
+                drop(remote);
+            }
+        }
     }
 
     @Override
@@ -270,7 +538,7 @@ public final class UpstreamProxy implements AutoCloseable {
             try {
                 server.close();
             } catch (IOException ignored) {
-                // 이미 닫힌 채널
+                // 이미 닫힌 소켓
             }
         }
         if (acceptThread != null) {
@@ -286,9 +554,17 @@ public final class UpstreamProxy implements AutoCloseable {
         }
     }
 
-    private static void closeQuietly(SocketChannel channel) {
+    private static void shutdownOutput(Socket socket) {
         try {
-            channel.close();
+            socket.shutdownOutput();
+        } catch (IOException ignored) {
+            // 이미 닫힌 소켓
+        }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        try {
+            socket.close();
         } catch (IOException ignored) {
             // 닫기 실패는 연결이 이미 끝난 것이다
         }

@@ -51,20 +51,18 @@ public record AgentProperties(
     }
 
     /**
-     * 온프레미스가 감당하지 못하는 연결을 클라우드(k3s)로 넘긴다.
+     * 온프레미스가 감당하지 못하는 요청을 클라우드(k3s)로 넘긴다.
      *
      * @param builderUrl         lily-builder 의 공개 주소 (/api/burst 만 열려 있다). 예: http://builder.1.2.3.4.nip.io
      * @param token              lily-builder 의 BURST_API_TOKEN
      * @param ingressHost        넘길 곳. 클라우드 Ingress 가 듣는 IP 또는 호스트
      * @param ingressPort        보통 80
      * @param publicHost         사용자가 여는 호스트. {@code {app}} 을 앱 이름으로 바꾼다. 비우면 {@code {app}.{zone}}
-     * @param localLimit         로컬 슬롯이 동시에 받을 연결 수. 넘치는 연결이 버스팅 대상
+     * @param localLimit         로컬 슬롯이 동시에 처리할 요청 수. 넘치는 요청이 버스팅 대상
      * @param scaleUpAfterSeconds 이 시간 동안 계속 넘치면 클라우드를 올린다
      * @param cooldownSeconds    이 시간 동안 한가하면 클라우드를 내린다
      * @param replicas           클라우드에 올릴 Pod 수 (DB 커넥션 제한: 로컬 1 + 클라우드 N, 각 풀 3 이 20 이하)
      * @param database           클라우드 대기 배포에 붙일 DB (postgres / mysql). 비우면 없음
-     * @param remoteIdleSeconds  클라우드로 넘긴 연결이 응답을 끝내고 이 시간 동안 조용하면 닫는다.
-     *                           cloudflared 가 keep-alive 로 연결을 붙잡아 클라우드에 계속 묶이는 것을 막는다
      */
     public record Burst(
             @DefaultValue("false") boolean enabled,
@@ -77,8 +75,7 @@ public record AgentProperties(
             @DefaultValue("3") int scaleUpAfterSeconds,
             @DefaultValue("30") int cooldownSeconds,
             @DefaultValue("2") int replicas,
-            @DefaultValue("") String database,
-            @DefaultValue("2") int remoteIdleSeconds) {
+            @DefaultValue("") String database) {
     }
 
     public record Cloudflare(

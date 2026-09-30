@@ -1,0 +1,7 @@
+.git
+.gradle
+build
+.idea
+test/burst/*.env
+test/burst/keys
+test/burst/*.log

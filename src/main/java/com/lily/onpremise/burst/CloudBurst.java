@@ -21,13 +21,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 클라우드 버스팅 상태 머신. 1초마다 프록시의 연결 수를 보고 판단한다.
+ * 클라우드 버스팅 상태 머신. 1초마다 프록시에서 처리 중인 요청 수를 보고 판단한다.
  *
  * <pre>
  * 배포 성공 → STANDBY  클라우드에 대기 배포 (레플리카 0) 요청, 빌드가 끝날 때까지
  *          → IDLE     로컬만 처리
  * 로컬이 한도를 scaleUpAfter 초 동안 넘김 → SCALING  클라우드 레플리카 N 으로
- * 클라우드 Ready 1 이상 → OVERFLOWING  넘치는 연결을 클라우드 Ingress 로
+ * 클라우드 Ready 1 이상 → OVERFLOWING  넘치는 요청을 클라우드 Ingress 로
  * cooldown 초 동안 한가 → 넘김 끄고 레플리카 0 → IDLE
  * </pre>
  */
@@ -72,7 +72,6 @@ public class CloudBurst {
             return;
         }
         exposure.proxy().localLimit(settings.localLimit());
-        exposure.proxy().remoteIdle(settings.remoteIdleSeconds());
         scheduler.scheduleWithFixedDelay(this::safeTick, 1, 1, TimeUnit.SECONDS);
         event("enabled: localLimit=" + settings.localLimit() + " replicas=" + settings.replicas()
                 + " target=" + settings.ingressHost() + ":" + settings.ingressPort());
@@ -154,7 +153,7 @@ public class CloudBurst {
 
         switch (phase) {
             case IDLE -> {
-                // 한도가 찬 채로 새 연결이 오거나, keep-alive 로 연결이 한도만큼 계속 붙어 있으면 과부하
+                // 한도가 찬 채로 새 요청이 오거나, 처리 중인 요청이 한도만큼 계속 있으면 과부하
                 boolean pressured = delta > 0 || p.localActive() >= p.localLimit();
                 if (!pressured) {
                     saturatedSince = 0;
@@ -174,8 +173,10 @@ public class CloudBurst {
             }
             case SCALING -> {
                 BurstClient.AppState app = client.app(appName);
-                if (app.readyReplicas() >= 1) {
-                    proxy.overflowTo(new InetSocketAddress(settings.ingressHost(), settings.ingressPort()));
+                InetSocketAddress ingress = new InetSocketAddress(settings.ingressHost(), settings.ingressPort());
+                // Deployment 가 Ready 여도 Ingress 엔드포인트 반영은 늦다. 공개 호스트로 Pod 까지 닿는지 확인하고 넘긴다
+                if (app.readyReplicas() >= 1 && IngressProbe.reachesPod(ingress, host)) {
+                    proxy.overflowTo(ingress);
                     phase = Phase.OVERFLOWING;
                     quietSince = 0;
                     event("overflowing: cloud ready " + app.readyReplicas() + "/" + app.replicas());
