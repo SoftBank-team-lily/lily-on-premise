@@ -42,6 +42,8 @@ lily:
       cooldown-seconds: ${BURST_COOLDOWN_SECONDS:30}
       replicas: ${BURST_REPLICAS:2}
       database: ${BURST_DATABASE:}
+      # 클라우드로 넘긴 연결이 응답 후 이 시간 동안 조용하면 닫는다 (cloudflared keep-alive 회수)
+      remote-idle-seconds: ${BURST_REMOTE_IDLE_SECONDS:2}
     # 클라우드 RDS 연동: 배포 요청에 database 가 있으면 SSH 터널로 같은 DB 에 붙인다 (계정은 lily-builder 를 거쳐 받는다)
     database:
       ssh-host: ${DB_TUNNEL_SSH_HOST:}
