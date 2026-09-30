@@ -1,0 +1,4 @@
+cloudflare.env
+burst.env
+keys/
+*.log
