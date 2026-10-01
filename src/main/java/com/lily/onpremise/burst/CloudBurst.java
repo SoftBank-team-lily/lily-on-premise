@@ -9,6 +9,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.InetSocketAddress;
@@ -19,17 +20,23 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiPredicate;
 
 /**
  * 클라우드 버스팅 상태 머신. 1초마다 프록시에서 처리 중인 요청 수를 보고 판단한다.
  *
  * <pre>
- * 배포 성공 → STANDBY  클라우드에 대기 배포 (레플리카 0) 요청, 빌드가 끝날 때까지
- *          → IDLE     로컬만 처리
- * 로컬이 한도를 scaleUpAfter 초 동안 넘김 → SCALING  클라우드 레플리카 N 으로
- * 클라우드 Ready 1 이상 → OVERFLOWING  넘치는 요청을 클라우드 Ingress 로
- * cooldown 초 동안 한가 → 넘김 끄고 레플리카 0 → IDLE
+ * 배포 성공 → STANDBY  클라우드에 대기 배포 요청, 빌드가 끝날 때까지
+ *          → WARMING  대기 Pod warmReplicas 대를 띄우고 Ingress 로 닿을 때까지 (warmReplicas 0 이면 건너뜀)
+ *          → IDLE     로컬이 한도 안에서 처리. 대기 Pod 가 있으면 한도를 넘는 요청은 바로 그쪽으로
+ * 로컬이 한도를 scaleUpAfter 초 동안 넘김
+ *          → 대기 Pod 있음: OVERFLOWING  레플리카 N 으로 올리면서 넘김은 이미 켜져 있다
+ *          → 대기 Pod 없음: SCALING      레플리카 N 으로, Ready 1 이상이면 OVERFLOWING
+ * cooldown 초 동안 한가 → 레플리카를 warmReplicas 로 (없으면 넘김 끄고 0) → IDLE
  * </pre>
+ *
+ * 대기 Pod 를 두는 이유: 0 에서 띄우면 Spring 앱 기준 Ingress 가 Pod 까지 닿는 데 20~40초 걸리고,
+ * 그동안 넘기지 못해 로컬에 요청이 쌓인다.
  */
 @Component
 public class CloudBurst {
@@ -38,12 +45,13 @@ public class CloudBurst {
     private static final long SCALE_TIMEOUT_MILLIS = 180_000;
     private static final int EVENT_LIMIT = 30;
 
-    public enum Phase { OFF, STANDBY, IDLE, SCALING, OVERFLOWING }
+    public enum Phase { OFF, STANDBY, WARMING, IDLE, SCALING, OVERFLOWING }
 
     private final AgentProperties.Burst settings;
     private final AgentProperties.Cloudflare cloudflare;
-    private final LocalExposure exposure;
+    private final UpstreamProxy proxy;
     private final BurstClient client;
+    private final BiPredicate<InetSocketAddress, String> reachesPod;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "lily-burst");
         t.setDaemon(true);
@@ -54,16 +62,27 @@ public class CloudBurst {
     private volatile Phase phase = Phase.OFF;
     private volatile String appName;
     private volatile String host;
+    /** 대기 Pod 가 Ingress 로 닿아서 넘김이 켜져 있다 */
+    private volatile boolean warm;
     private long lastSaturated;
     private long saturatedSince;
     private long quietSince;
     private long scalingSince;
 
+    @Autowired
     public CloudBurst(AgentProperties properties, LocalExposure exposure, ObjectMapper json) {
-        this.settings = properties.burst();
-        this.cloudflare = properties.cloudflare();
-        this.exposure = exposure;
-        this.client = settings.enabled() ? new BurstClient(settings, json) : null;
+        this(properties.burst(), properties.cloudflare(), exposure.proxy(),
+                properties.burst().enabled() ? new BurstClient(properties.burst(), json) : null,
+                IngressProbe::reachesPod);
+    }
+
+    CloudBurst(AgentProperties.Burst settings, AgentProperties.Cloudflare cloudflare, UpstreamProxy proxy,
+               BurstClient client, BiPredicate<InetSocketAddress, String> reachesPod) {
+        this.settings = settings;
+        this.cloudflare = cloudflare;
+        this.proxy = proxy;
+        this.client = client;
+        this.reachesPod = reachesPod;
     }
 
     @PostConstruct
@@ -71,9 +90,10 @@ public class CloudBurst {
         if (!settings.enabled()) {
             return;
         }
-        exposure.proxy().localLimit(settings.localLimit());
+        proxy.localLimit(settings.localLimit());
         scheduler.scheduleWithFixedDelay(this::safeTick, 1, 1, TimeUnit.SECONDS);
         event("enabled: localLimit=" + settings.localLimit() + " replicas=" + settings.replicas()
+                + " warm=" + settings.warmReplicas()
                 + " target=" + settings.ingressHost() + ":" + settings.ingressPort());
     }
 
@@ -92,7 +112,8 @@ public class CloudBurst {
             event("skip: publicHost 를 정할 수 없습니다 (BURST_PUBLIC_HOST 또는 Cloudflare zone 필요)");
             return;
         }
-        exposure.proxy().clearOverflow();
+        proxy.clearOverflow();
+        this.warm = false;
         this.appName = job.appName();
         this.host = publicHost;
         this.phase = Phase.STANDBY;
@@ -100,9 +121,9 @@ public class CloudBurst {
     }
 
     public Status status() {
-        UpstreamProxy.Pressure pressure = exposure.proxy().pressure();
+        UpstreamProxy.Pressure pressure = proxy.pressure();
         synchronized (events) {
-            return new Status(settings.enabled(), phase, appName, host, pressure, List.copyOf(events));
+            return new Status(settings.enabled(), phase, appName, host, warm, pressure, List.copyOf(events));
         }
     }
 
@@ -115,8 +136,7 @@ public class CloudBurst {
             while (System.currentTimeMillis() < deadline) {
                 BurstClient.BuildState state = client.build(id);
                 if ("SUCCEEDED".equals(state.status())) {
-                    phase = Phase.IDLE;
-                    event("standby ready: cloud replicas 0");
+                    standbyReady(System.currentTimeMillis());
                     return;
                 }
                 if ("FAILED".equals(state.status())) {
@@ -136,22 +156,45 @@ public class CloudBurst {
         }
     }
 
+    /** 대기 배포가 끝났다 (builder 가 레플리카 0 으로 내려 둔 상태). 대기 Pod 를 띄운다 */
+    void standbyReady(long now) {
+        if (settings.warmReplicas() < 1) {
+            phase = Phase.IDLE;
+            event("standby ready: cloud replicas 0");
+            return;
+        }
+        client.scale(appName, settings.warmReplicas());
+        phase = Phase.WARMING;
+        scalingSince = now;
+        event("standby ready: warming cloud replicas " + settings.warmReplicas());
+    }
+
     private void safeTick() {
         try {
-            tick();
+            tick(proxy.pressure(), System.currentTimeMillis());
         } catch (RuntimeException e) {
             event("error: " + e.getMessage());
         }
     }
 
-    void tick() {
-        UpstreamProxy proxy = exposure.proxy();
-        UpstreamProxy.Pressure p = proxy.pressure();
+    void tick(UpstreamProxy.Pressure p, long now) {
         long delta = p.saturatedTotal() - lastSaturated;
         lastSaturated = p.saturatedTotal();
-        long now = System.currentTimeMillis();
 
         switch (phase) {
+            case WARMING -> {
+                if (cloudReachable()) {
+                    proxy.overflowTo(ingress());
+                    warm = true;
+                    phase = Phase.IDLE;
+                    event("warm: cloud ready, overflow on");
+                } else if (now - scalingSince > SCALE_TIMEOUT_MILLIS) {
+                    // 대기 Pod 없이도 동작은 한다. 넘길 때 띄우는 방식으로 돌아간다
+                    client.scale(appName, 0);
+                    phase = Phase.IDLE;
+                    event("warm timeout: cloud back to 0");
+                }
+            }
             case IDLE -> {
                 // 한도가 찬 채로 새 요청이 오거나, 처리 중인 요청이 한도만큼 계속 있으면 과부하
                 boolean pressured = delta > 0 || p.localActive() >= p.localLimit();
@@ -163,20 +206,26 @@ public class CloudBurst {
                     saturatedSince = now;
                 }
                 if (now - saturatedSince >= settings.scaleUpAfterSeconds() * 1000L) {
-                    client.scale(appName, settings.replicas());
-                    phase = Phase.SCALING;
-                    scalingSince = now;
+                    int replicas = Math.max(settings.replicas(), settings.warmReplicas());
+                    client.scale(appName, replicas);
                     saturatedSince = 0;
+                    if (warm) {
+                        // 넘김은 대기 Pod 로 이미 켜져 있다. 늘어나는 Pod 는 Ready 되는 대로 Ingress 가 나눠 준다
+                        phase = Phase.OVERFLOWING;
+                        quietSince = 0;
+                    } else {
+                        phase = Phase.SCALING;
+                        scalingSince = now;
+                    }
                     event("scale up: local " + p.localActive() + "/" + p.localLimit()
-                            + " -> cloud replicas " + settings.replicas());
+                            + " -> cloud replicas " + replicas + (warm ? " (warm, overflowing)" : ""));
                 }
             }
             case SCALING -> {
                 BurstClient.AppState app = client.app(appName);
-                InetSocketAddress ingress = new InetSocketAddress(settings.ingressHost(), settings.ingressPort());
                 // Deployment 가 Ready 여도 Ingress 엔드포인트 반영은 늦다. 공개 호스트로 Pod 까지 닿는지 확인하고 넘긴다
-                if (app.readyReplicas() >= 1 && IngressProbe.reachesPod(ingress, host)) {
-                    proxy.overflowTo(ingress);
+                if (app.readyReplicas() >= 1 && reachesPod.test(ingress(), host)) {
+                    proxy.overflowTo(ingress());
                     phase = Phase.OVERFLOWING;
                     quietSince = 0;
                     event("overflowing: cloud ready " + app.readyReplicas() + "/" + app.replicas());
@@ -196,17 +245,30 @@ public class CloudBurst {
                     quietSince = now;
                 }
                 if (now - quietSince >= settings.cooldownSeconds() * 1000L) {
-                    proxy.clearOverflow();
-                    client.scale(appName, 0);
+                    if (warm) {
+                        client.scale(appName, settings.warmReplicas());
+                    } else {
+                        proxy.clearOverflow();
+                        client.scale(appName, 0);
+                    }
                     phase = Phase.IDLE;
-                    event("scale down: quiet " + settings.cooldownSeconds() + "s, overflowed total "
-                            + p.overflowedTotal());
+                    event("scale down: quiet " + settings.cooldownSeconds() + "s, cloud replicas "
+                            + (warm ? settings.warmReplicas() : 0) + ", overflowed total " + p.overflowedTotal());
                 }
             }
             default -> {
                 // OFF, STANDBY: 판단하지 않는다
             }
         }
+    }
+
+    private boolean cloudReachable() {
+        BurstClient.AppState app = client.app(appName);
+        return app.readyReplicas() >= 1 && reachesPod.test(ingress(), host);
+    }
+
+    private InetSocketAddress ingress() {
+        return new InetSocketAddress(settings.ingressHost(), settings.ingressPort());
     }
 
     private String publicHost(String app) {
@@ -228,7 +290,7 @@ public class CloudBurst {
         }
     }
 
-    public record Status(boolean enabled, Phase phase, String appName, String publicHost,
+    public record Status(boolean enabled, Phase phase, String appName, String publicHost, boolean warm,
                          UpstreamProxy.Pressure pressure, List<String> events) {
     }
 }

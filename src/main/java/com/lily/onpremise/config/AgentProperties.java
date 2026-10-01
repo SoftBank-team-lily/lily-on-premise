@@ -75,6 +75,7 @@ public record AgentProperties(
             @DefaultValue("3") int scaleUpAfterSeconds,
             @DefaultValue("30") int cooldownSeconds,
             @DefaultValue("2") int replicas,
+            @DefaultValue("1") int warmReplicas,
             @DefaultValue("") String database) {
     }
 
