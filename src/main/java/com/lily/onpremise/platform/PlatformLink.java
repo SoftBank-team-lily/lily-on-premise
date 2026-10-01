@@ -8,7 +8,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import com.lily.onpremise.database.DatabaseModes;
+import com.lily.onpremise.database.ReverseTunnel;
+
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -18,8 +22,12 @@ import java.util.Map;
  * 에이전트 → hello   {..., "platform": true, "sshPublicKey": "ssh-ed25519 ...", "databaseHost": "172.17.0.1", "databasePort": 15432}
  * builder  → welcome {"type":"welcome","tunnelAgentId":"agent-{key}",
  *                     "cloudflare":{"accountId":"..","zoneId":"..","zoneName":"lilycloud.kr"},
- *                     "database":{"sshHost":"..","sshUser":"lily-tunnel","remoteHost":"..","remotePort":5432,"certificate":"ssh-ed25519-cert-v01@openssh.com ..."}}
+ *                     "database":{"sshHost":"..","sshUser":"lily-tunnel","remoteHost":"..","remotePort":5432,"certificate":"ssh-ed25519-cert-v01@openssh.com ...",
+ *                                 "reverseHost":"10.0.1.10","reversePort":20000}}
  * </pre>
+ *
+ * reverseHost·reversePort 가 있으면 이 PC 의 DB(local·external)를 그 주소로 클라우드에 연다 (클라우드 대기 배포용).
+ * hello 의 databaseModes 는 이 에이전트가 받을 수 있는 DB 위치다.
  *
  * cloudflare 나 database 가 없으면 그 기능은 플랫폼이 주지 않는 것이다 (quick tunnel, DB 없는 앱만).
  */
@@ -44,7 +52,8 @@ public class PlatformLink {
         if (properties.platformExposure()) {
             extra.put("platform", true);
         }
-        if (databases instanceof PlatformDatabase db) {
+        extra.put("databaseModes", List.of("cloud", "local", "external"));
+        if (platformDatabase() instanceof PlatformDatabase db) {
             try {
                 extra.put("sshPublicKey", db.publicKey());
                 extra.put("databaseHost", db.bindHost());
@@ -61,7 +70,7 @@ public class PlatformLink {
      */
     public void welcome(JsonNode message) {
         JsonNode db = message.path("database");
-        if (databases instanceof PlatformDatabase platformDb && db.isObject()) {
+        if (platformDatabase() instanceof PlatformDatabase platformDb && db.isObject()) {
             try {
                 platformDb.configure(
                         db.path("sshHost").asText(),
@@ -70,6 +79,15 @@ public class PlatformLink {
                         db.path("remotePort").asInt(5432),
                         db.path("certificate").asText());
                 log.info("platform db tunnel certificate received");
+                if (databases instanceof DatabaseModes modes && db.hasNonNull("reverseHost")
+                        && db.path("reversePort").asInt(0) > 0) {
+                    modes.reverse().configure(new ReverseTunnel.Settings(
+                            db.path("sshHost").asText(), db.path("sshUser").asText("lily-tunnel"),
+                            platformDb.key(), platformDb.knownHosts(),
+                            db.path("reverseHost").asText(), db.path("reversePort").asInt()));
+                    log.info("platform reverse tunnel offered: {}:{}", db.path("reverseHost").asText(),
+                            db.path("reversePort").asInt());
+                }
             } catch (RuntimeException e) {
                 log.warn("platform db tunnel rejected: {}", e.getMessage());
             }
@@ -80,5 +98,10 @@ public class PlatformLink {
                 : null;
         String tunnelAgentId = message.path("tunnelAgentId").asText("");
         Thread.ofVirtual().name("lily-platform").start(() -> exposure.attachPlatform(tunnelAgentId, zone));
+    }
+
+    /** RDS 터널 구현. DB 위치별로 나눈 경우 그 안의 cloud 쪽 */
+    private DatabaseAccess platformDatabase() {
+        return databases instanceof DatabaseModes modes ? modes.cloud() : databases;
     }
 }

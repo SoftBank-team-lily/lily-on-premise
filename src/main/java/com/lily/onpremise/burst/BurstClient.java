@@ -30,6 +30,14 @@ public class BurstClient {
 
     /** 클라우드에 같은 레포를 빌드·배포하고 레플리카 0 으로 대기시킨다. 빌드 id 를 돌려준다 */
     public String standby(DeployJob job, String host, String database) {
+        return standby(job, host, database, null);
+    }
+
+    /**
+     * @param databaseEnv 이 PC 의 DB 를 역방향 터널로 쓰는 접속 정보. 있으면 database 는 보내지 않는다
+     *                    (클라우드가 RDS 를 만들지 않고, 스키마는 온프레미스가 맡는다)
+     */
+    public String standby(DeployJob job, String host, String database, Map<String, String> databaseEnv) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("repoUrl", job.repoUrl());
         body.put("branch", job.branch());
@@ -42,6 +50,10 @@ public class BurstClient {
         body.put("livenessPath", job.healthPath());
         body.put("env", job.env());
         body.put("host", host);
+        if (databaseEnv != null && !databaseEnv.isEmpty()) {
+            body.put("database", null);
+            body.put("databaseEnv", databaseEnv);
+        }
         JsonNode node = send("POST", "/api/burst/apps/" + job.appName() + "/standby", body);
         return node.path("id").asText();
     }

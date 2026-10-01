@@ -31,6 +31,10 @@ public final class CliContainerRuntime implements ContainerRuntime {
         command.add(name);
         command.add("-p");
         command.add("127.0.0.1:" + hostPort + ":" + containerPort);
+        if (env.values().stream().anyMatch(value -> value != null && value.contains("host.docker.internal"))) {
+            // 사용자 PC 의 DB(localhost). Docker Desktop 은 원래 풀리고, Linux 는 이 연결이 있어야 풀린다
+            command.add("--add-host=host.docker.internal:host-gateway");
+        }
         env.forEach((key, value) -> {
             command.add("-e");
             command.add(key + "=" + value);

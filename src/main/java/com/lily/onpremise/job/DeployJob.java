@@ -28,7 +28,19 @@ public record DeployJob(
         String canaryPath,
         Map<String, String> migrations,
         /** 컨트롤 플레인이 터널 주소 기준으로 만든 DB 접속 환경변수 (플랫폼 DB 터널일 때) */
-        Map<String, String> databaseEnv) {
+        Map<String, String> databaseEnv,
+        /** DB 위치. cloud(기본): 클라우드 RDS 를 터널로, local: 이 PC 에 띄운 DB, external: databaseUrl */
+        String databaseMode,
+        /** external 일 때 DB 주소. postgresql://user:pass@host:port/db 또는 mysql://... */
+        String databaseUrl) {
+
+    /** DB 는 클라우드 RDS (이 필드 전의 잡) */
+    public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
+                     String healthPath, String rootDir, String dockerfile, Map<String, String> env, String database,
+                     String canaryPath, Map<String, String> migrations, Map<String, String> databaseEnv) {
+        this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database,
+                canaryPath, migrations, databaseEnv, null, null);
+    }
 
     /** DB 없이 배포 */
     public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
@@ -48,6 +60,18 @@ public record DeployJob(
                      String canaryPath, Map<String, String> migrations) {
         this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database,
                 canaryPath, migrations, null);
+    }
+
+    /** DB 위치. 비었으면 cloud */
+    public String databaseModeOrDefault() {
+        return databaseMode == null || databaseMode.isBlank() ? "cloud" : databaseMode;
+    }
+
+    /** DB 비밀번호가 든 주소를 로그에 남기지 않는다 */
+    @Override
+    public String toString() {
+        return "DeployJob[id=" + id + ", appName=" + appName + ", repoUrl=" + repoUrl + ", branch=" + branch
+                + ", database=" + database + ", databaseMode=" + databaseMode + "]";
     }
 
     public DeployJob normalize() {
@@ -101,6 +125,21 @@ public record DeployJob(
         if (engine != null && !engine.matches("postgres|mysql")) {
             throw new IllegalArgumentException("database 는 postgres 또는 mysql 입니다");
         }
+        String mode = blankToNull(databaseMode);
+        if (mode != null && !mode.matches("cloud|local|external")) {
+            throw new IllegalArgumentException("databaseMode 는 cloud, local, external 입니다");
+        }
+        String url = blankToNull(databaseUrl);
+        if ("external".equals(mode)) {
+            if (engine == null) {
+                throw new IllegalArgumentException("databaseUrl 은 database 와 같이 보냅니다");
+            }
+            if (url == null || url.length() > 500 || url.chars().anyMatch(c -> c <= ' ')) {
+                throw new IllegalArgumentException("databaseUrl 이 올바르지 않습니다");
+            }
+        } else {
+            url = null;
+        }
         String secret = blankToNull(token);
         if (secret != null && !secret.matches("[A-Za-z0-9_]+")) {
             throw new IllegalArgumentException("token 형식이 올바르지 않습니다");
@@ -120,7 +159,9 @@ public record DeployJob(
                 engine,
                 canary,
                 cleanMigrations(migrations),
-                cleanEnv(databaseEnv));
+                cleanEnv(databaseEnv),
+                engine == null || "cloud".equals(mode) ? null : mode,
+                url);
     }
 
     private static URI parseRepo(String repo) {
