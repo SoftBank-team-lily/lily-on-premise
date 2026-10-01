@@ -46,15 +46,12 @@ public final class LocalDatabase {
             throw new IllegalArgumentException("DB 이름으로 쓸 수 없는 앱 이름: " + appName);
         }
         if ("mysql".equals(engine)) {
-            String admin = secret("mysql-admin");
             String password = secret("mysql-" + name);
-            ensureMysql(admin);
-            admin(List.of("docker", "exec", "-e", "MYSQL_PWD=" + admin, "lily-mysql",
-                    "mysql", "-uroot", "-h127.0.0.1", "-P" + MYSQL_PORT, "-e",
-                    "CREATE DATABASE IF NOT EXISTS `" + name + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+            ensureMysql(secret("mysql-admin"));
+            admin(mysql("CREATE DATABASE IF NOT EXISTS `" + name + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
                             + " CREATE USER IF NOT EXISTS '" + name + "'@'%' IDENTIFIED BY '" + password + "';"
                             + " ALTER USER '" + name + "'@'%' IDENTIFIED BY '" + password + "';"
-                            + " GRANT ALL PRIVILEGES ON `" + name + "`.* TO '" + name + "'@'%';"),
+                            + " GRANT ALL PRIVILEGES ON `" + name + "`.* TO '" + name + "'@'%';", "mysql"),
                     "mysql: database " + name);
             return new DatabaseCredentials("mysql", bindHost, MYSQL_PORT, name, name, password, "");
         }
@@ -100,8 +97,21 @@ public final class LocalDatabase {
                     "--port=" + MYSQL_PORT, "--bind-address=" + listen(), "--mysqlx=OFF"), "mysql: start container");
             log.info("local mysql started on {}:{}", bindHost, MYSQL_PORT);
         }
-        await(List.of("docker", "exec", "-e", "MYSQL_PWD=" + admin, "lily-mysql", "mysqladmin", "ping", "--silent",
-                "-uroot", "-h127.0.0.1", "-P" + MYSQL_PORT), "mysql");
+        await(mysql(null, "mysqladmin"), "mysql");
+    }
+
+    /**
+     * 관리자 비밀번호는 컨테이너 환경변수(MYSQL_ROOT_PASSWORD)에서 읽는다. 에이전트 컨테이너를 다시 만들면
+     * 이 PC 의 작업 폴더가 비어서 처음 만든 비밀번호를 잃는다. SQL 은 셸이 해석하지 않게 환경변수로 넘긴다
+     */
+    private static List<String> mysql(String sql, String client) {
+        String auth = "MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" ";
+        if ("mysqladmin".equals(client)) {
+            return List.of("docker", "exec", "lily-mysql", "sh", "-c",
+                    auth + "mysqladmin ping --silent -uroot -h127.0.0.1 -P" + MYSQL_PORT);
+        }
+        return List.of("docker", "exec", "-e", "LILY_SQL=" + sql, "lily-mysql", "sh", "-c",
+                auth + "mysql -uroot -h127.0.0.1 -P" + MYSQL_PORT + " -e \"$LILY_SQL\"");
     }
 
     private String listen() {
