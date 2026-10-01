@@ -143,7 +143,7 @@ public final class OnPremPipeline {
         stage(record, publish, JobRecord.Status.STARTING, "start: " + name + " 127.0.0.1:" + port);
         runtime.start(name, image, port, job.targetPort(), env);
 
-        stage(record, publish, JobRecord.Status.HEALTH, "health: 127.0.0.1:" + port + health);
+        stage(record, publish, JobRecord.Status.HEALTH, "health: 127.0.0.1:" + port + ("tcp".equalsIgnoreCase(health) ? " (tcp)" : health));
         try {
             readiness.await(port, health);
         } catch (RuntimeException e) {

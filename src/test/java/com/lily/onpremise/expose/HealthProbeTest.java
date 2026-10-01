@@ -36,6 +36,28 @@ class HealthProbeTest {
         }
     }
 
+    @Test
+    void tcp_면_HTTP_상태와_상관없이_포트가_열리면_통과한다() throws Exception {
+        // / 가 401 인 앱 (Spring Security)
+        HttpServer server = server(401);
+        try {
+            probe(Duration.ofMillis(500)).await(server.getAddress().getPort(), "tcp");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void tcp_면_포트가_닫혀_있을_때_실패한다() throws Exception {
+        int closed;
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+            closed = socket.getLocalPort();
+        }
+        int port = closed;
+        assertThatThrownBy(() -> probe(Duration.ofMillis(200)).await(port, "tcp"))
+                .hasMessageContaining("ready timeout: tcp");
+    }
+
     private static HealthProbe probe(Duration timeout) {
         return new HealthProbe(
                 HttpClient.newBuilder().connectTimeout(Duration.ofMillis(200)).build(),
