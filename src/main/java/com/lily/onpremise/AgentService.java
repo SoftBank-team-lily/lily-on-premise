@@ -1,6 +1,7 @@
 package com.lily.onpremise;
 
 import com.lily.onpremise.burst.CloudBurst;
+import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobRecord;
 import com.lily.onpremise.job.JobStore;
@@ -26,15 +27,18 @@ public class AgentService implements JobSink {
     private final ControlSession session;
     private final JobRunner runner;
     private final CloudBurst burst;
+    private final HomeCutover cutover;
     private final Object gate = new Object();
 
     public AgentService(JobStore store, OnPremPipeline pipeline, ControlSession session, JobRunner runner,
-                        CloudBurst burst) {
+                        CloudBurst burst, HomeCutover cutover) {
         this.store = store;
         this.pipeline = pipeline;
         this.session = session;
         this.runner = runner;
         this.burst = burst;
+        this.cutover = cutover;
+        cutover.publisher(this::publish);
     }
 
     @Override
@@ -60,6 +64,9 @@ public class AgentService implements JobSink {
 
     @Override
     public JobRecord rollback(String app, String id) {
+        if (!cutover.localRollbackAllowed()) {
+            throw new IllegalArgumentException("거점이 클라우드입니다. 반대 방향 전환을 호출하세요");
+        }
         if (app == null || !app.matches("[a-z][a-z0-9-]{0,30}")) {
             throw new IllegalArgumentException("app 이 올바르지 않습니다");
         }
@@ -81,6 +88,46 @@ public class AgentService implements JobSink {
             }
         });
         return record;
+    }
+
+    @Override
+    public HomeCutover.Status home(String app, String target, String id) {
+        if (app == null || !app.matches("[a-z][a-z0-9-]{0,30}")) {
+            throw new IllegalArgumentException("app 이 올바르지 않습니다");
+        }
+        String idValue = id == null || id.isBlank()
+                ? "h" + UUID.randomUUID().toString().replace("-", "").substring(0, 7)
+                : id;
+        if (!idValue.matches("[a-z0-9][a-z0-9-]{0,40}")) {
+            throw new IllegalArgumentException("id 가 올바르지 않습니다");
+        }
+        if (store.find(idValue).isPresent()) {
+            throw new IllegalArgumentException("이미 받은 잡입니다: " + idValue);
+        }
+        HomeCutover.Status status = cutover.begin(app, target);
+        if (status.already()) {
+            return status;
+        }
+        JobRecord record = new JobRecord(idValue, app);
+        record.update(JobRecord.Status.QUEUED, "home: " + target);
+        publish(record);
+        runner.run(() -> {
+            synchronized (gate) {
+                try {
+                    cutover.perform();
+                    record.update(JobRecord.Status.SUCCEEDED, "home: " + cutover.status().phase());
+                } catch (RuntimeException e) {
+                    String message = e.getMessage() == null ? "home failed" : e.getMessage();
+                    record.update(JobRecord.Status.FAILED, "failed: " + message);
+                }
+                publish(record);
+            }
+        });
+        return status;
+    }
+
+    public HomeCutover.Status homeStatus() {
+        return cutover.status();
     }
 
     public Optional<JobRecord> get(String id) {

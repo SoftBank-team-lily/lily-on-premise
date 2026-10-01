@@ -61,6 +61,39 @@ class CloudflareHostnameProvisionerTest {
     }
 
     @Test
+    void DNS_를_잡아_두면_터널_CNAME_을_쓰지_않는다() {
+        ScriptedCloudflare api = new ScriptedCloudflare();
+        api.packs = packs("active", "*.lily.dev");
+        CloudflareHostnameProvisioner provisioner = provisioner(api);
+        provisioner.openTunnel("ab12");
+        provisioner.holdDns(true);
+
+        assertThat(provisioner.ensureHostname("blog", 8099)).isEqualTo("https://blog.lily.dev");
+
+        assertThat(api.calls).noneMatch(call -> call.contains("/dns_records"));
+        assertThat(api.calls).anyMatch(call -> call.contains("/configurations"));
+    }
+
+    @Test
+    void CNAME_내용물만_바꾼다() {
+        ScriptedCloudflare api = new ScriptedCloudflare();
+        api.packs = packs("active", "*.lily.dev");
+        api.records = MAPPER.createArrayNode().add(MAPPER.createObjectNode()
+                .put("id", "rec")
+                .put("content", "tid.cfargotunnel.com")
+                .put("proxied", true));
+        CloudflareHostnameProvisioner provisioner = provisioner(api);
+        provisioner.openTunnel("ab12");
+
+        provisioner.point("blog.lily.dev", "alb.example.net");
+
+        assertThat(api.calls).anyMatch(call -> call.startsWith("PUT /zones/zone/dns_records/"));
+        assertThat(api.dnsBody.path("type").asText()).isEqualTo("CNAME");
+        assertThat(api.dnsBody.path("content").asText()).isEqualTo("alb.example.net");
+        assertThat(provisioner.cname("blog.lily.dev")).isEqualTo("alb.example.net");
+    }
+
+    @Test
     void 인증서가_호스트를_덮지_않으면_Advanced_Certificate_를_주문한다() {
         ScriptedCloudflare api = new ScriptedCloudflare();
         api.packs = packs("active", "lily.dev");
@@ -118,6 +151,12 @@ class CloudflareHostnameProvisionerTest {
             }
             if (method.equals("POST") && path.endsWith("/dns_records")) {
                 dnsBody = body;
+                records = MAPPER.createArrayNode().add(((com.fasterxml.jackson.databind.node.ObjectNode) body.deepCopy()).put("id", "rec"));
+                return MAPPER.createObjectNode().put("id", "rec");
+            }
+            if (method.equals("PUT") && path.contains("/dns_records/")) {
+                dnsBody = body;
+                records = MAPPER.createArrayNode().add(((com.fasterxml.jackson.databind.node.ObjectNode) body.deepCopy()).put("id", "rec"));
                 return MAPPER.createObjectNode().put("id", "rec");
             }
             if (path.endsWith("/ssl/certificate_packs")) {

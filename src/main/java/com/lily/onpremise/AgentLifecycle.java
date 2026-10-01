@@ -1,5 +1,6 @@
 package com.lily.onpremise;
 
+import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.expose.LocalExposure;
 import com.lily.onpremise.session.ControlSession;
 import org.springframework.boot.ApplicationArguments;
@@ -12,15 +13,18 @@ public class AgentLifecycle implements ApplicationRunner {
 
     private final LocalExposure exposure;
     private final ControlSession session;
+    private final HomeCutover cutover;
 
-    public AgentLifecycle(LocalExposure exposure, ControlSession session) {
+    public AgentLifecycle(LocalExposure exposure, ControlSession session, HomeCutover cutover) {
         this.exposure = exposure;
         this.session = session;
+        this.cutover = cutover;
     }
 
     @Override
     public void run(ApplicationArguments args) {
         exposure.open();
+        cutover.restore();
         session.connectIfConfigured();
     }
 }

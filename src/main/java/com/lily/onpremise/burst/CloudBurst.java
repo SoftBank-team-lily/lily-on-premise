@@ -21,6 +21,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiPredicate;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /**
  * 클라우드 버스팅 상태 머신. 1초마다 프록시에서 처리 중인 요청 수를 보고 판단한다.
@@ -39,7 +41,7 @@ import java.util.function.BiPredicate;
  * 그동안 넘기지 못해 로컬에 요청이 쌓인다.
  */
 @Component
-public class CloudBurst {
+public class CloudBurst implements BurstGate {
 
     private static final Logger log = LoggerFactory.getLogger(CloudBurst.class);
     private static final long SCALE_TIMEOUT_MILLIS = 180_000;
@@ -68,6 +70,9 @@ public class CloudBurst {
     private long saturatedSince;
     private long quietSince;
     private long scalingSince;
+    /** 거점이 온프레미스가 아니면 레플리카를 움직이지 않는다 */
+    private volatile BooleanSupplier scaleGate = () -> true;
+    private volatile Consumer<DeployJob> standbyListener;
 
     @Autowired
     public CloudBurst(AgentProperties properties, LocalExposure exposure, ObjectMapper json) {
@@ -100,6 +105,25 @@ public class CloudBurst {
     @PreDestroy
     void stop() {
         scheduler.shutdownNow();
+    }
+
+    @Override
+    public void allowScale(BooleanSupplier gate) {
+        this.scaleGate = gate == null ? () -> true : gate;
+    }
+
+    @Override
+    public void whenStandby(Consumer<DeployJob> listener) {
+        this.standbyListener = listener;
+    }
+
+    /** 공개 주소가 클라우드를 보는 동안 버스팅이 레플리카를 0으로 내리지 않게 한다 */
+    @Override
+    public void park() {
+        proxy.clearOverflow();
+        warm = false;
+        phase = Phase.OFF;
+        event("park: home is cloud");
     }
 
     /** 온프레미스 배포가 성공하면 클라우드에 같은 앱을 대기 배포한다 */
@@ -136,6 +160,10 @@ public class CloudBurst {
             while (System.currentTimeMillis() < deadline) {
                 BurstClient.BuildState state = client.build(id);
                 if ("SUCCEEDED".equals(state.status())) {
+                    Consumer<DeployJob> listener = standbyListener;
+                    if (listener != null) {
+                        listener.accept(job);
+                    }
                     standbyReady(System.currentTimeMillis());
                     return;
                 }
@@ -178,6 +206,10 @@ public class CloudBurst {
     }
 
     void tick(UpstreamProxy.Pressure p, long now) {
+        if (!scaleGate.getAsBoolean()) {
+            lastSaturated = p.saturatedTotal();
+            return;
+        }
         long delta = p.saturatedTotal() - lastSaturated;
         lastSaturated = p.saturatedTotal();
 

@@ -2,6 +2,7 @@ package com.lily.onpremise.api;
 
 import com.lily.onpremise.AgentIdentity;
 import com.lily.onpremise.AgentService;
+import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobRecord;
@@ -39,6 +40,26 @@ public class JobController {
     @PostMapping("/api/jobs")
     public ResponseEntity<JobRecord> create(@RequestBody DeployJob job) {
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(service.accept(job));
+    }
+
+    @GetMapping("/api/apps/{appName}/home")
+    public ResponseEntity<HomeCutover.Status> home(@PathVariable String appName) {
+        HomeCutover.Status status = service.homeStatus();
+        if (status.appName() != null && !status.appName().isBlank() && !status.appName().equals(appName)) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(status);
+    }
+
+    /** 공개 주소의 거점을 옮긴다. 이미 그 거점이면 200, 진행을 시작하면 202 */
+    @PostMapping("/api/apps/{appName}/home")
+    public ResponseEntity<HomeCutover.Status> move(@PathVariable String appName, @RequestBody HomeBody body) {
+        HomeCutover.Status status = service.home(appName, body == null ? null : body.home(), null);
+        HttpStatus code = status.already() ? HttpStatus.OK : HttpStatus.ACCEPTED;
+        return ResponseEntity.status(code).body(status);
+    }
+
+    public record HomeBody(String home) {
     }
 
     /** 직전 슬롯으로 프록시를 되돌린다. 스키마는 그대로 둔다 */

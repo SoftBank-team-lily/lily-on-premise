@@ -3,6 +3,8 @@ package com.lily.onpremise.config;
 import com.lily.onpremise.AgentIdentity;
 import com.lily.onpremise.analyze.StackAnalyzer;
 import com.lily.onpremise.burst.BurstClient;
+import com.lily.onpremise.burst.CloudBurst;
+import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.burst.CloudDatabase;
 import com.lily.onpremise.burst.DatabaseTunnel;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,6 +27,7 @@ import com.lily.onpremise.source.GitWorkspace;
 import com.lily.onpremise.source.Workspace;
 import com.lily.onpremise.system.Commands;
 import com.lily.onpremise.system.ProcessCommands;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -116,6 +119,23 @@ public class RuntimeConfiguration {
         return new CloudDatabase(new DatabaseTunnel(db, commands, workDir), new BurstClient(properties.burst(), json));
     }
 
+    @Bean(destroyMethod = "close")
+    HomeCutover homeCutover(
+            AgentProperties properties,
+            CloudflareHostnameProvisioner hostnames,
+            CloudBurst burst,
+            ObjectProvider<OnPremPipeline> pipeline,
+            SlotBook slots,
+            ContainerRuntime runtime,
+            Commands commands,
+            ObjectMapper json) {
+        String dir = properties.workspace();
+        Path root = dir == null || dir.isBlank()
+                ? Path.of(System.getProperty("java.io.tmpdir"), "lily-onprem")
+                : Path.of(dir);
+        return new HomeCutover(properties, hostnames, burst, pipeline, slots, runtime, commands, json, root);
+    }
+
     @Bean
     OnPremPipeline pipeline(
             Workspace workspace,
@@ -128,9 +148,10 @@ public class RuntimeConfiguration {
             AgentProperties properties,
             DatabaseAccess databases,
             SchemaApply schema,
-            CandidateJudge judge) {
+            CandidateJudge judge,
+            HomeCutover homes) {
         return new OnPremPipeline(
                 workspace, analyzer, runtime, readiness, exposure, publicAddress, slots,
-                properties.bluePort(), properties.greenPort(), databases, schema, judge);
+                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes);
     }
 }

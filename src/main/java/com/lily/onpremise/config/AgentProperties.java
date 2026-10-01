@@ -25,7 +25,9 @@ public record AgentProperties(
         @DefaultValue("") String workspace,
         @DefaultValue Cloudflare cloudflare,
         @DefaultValue Burst burst,
-        @DefaultValue Database database) {
+        @DefaultValue Database database,
+        /** 공개 주소의 CNAME 을 클라우드 오리진으로 바꿀 때 쓴다. 비우면 거점 전환을 거절한다 */
+        @DefaultValue Cutover cutover) {
 
     /**
      * 온프레미스 앱이 클라우드와 같은 RDS 를 쓰도록 SSH 포트포워딩 터널을 연다.
@@ -78,6 +80,29 @@ public record AgentProperties(
             @DefaultValue("2") int replicas,
             @DefaultValue("1") int warmReplicas,
             @DefaultValue("") String database) {
+    }
+
+    /**
+     * 온프레미스와 클라우드 사이의 거점 전환.
+     * CNAME 타입은 유지하고 내용물만 바꾼다. 값이 IP 이거나 비어 있으면 전환을 거절한다.
+     *
+     * @param cloudOrigin 클라우드 거점의 CNAME 내용물. 호스트 이름
+     */
+    public record Cutover(@DefaultValue("") String cloudOrigin) {
+
+        public Cutover {
+            if (cloudOrigin == null) {
+                cloudOrigin = "";
+            }
+            cloudOrigin = cloudOrigin.trim().toLowerCase();
+            if (cloudOrigin.endsWith(".")) {
+                cloudOrigin = cloudOrigin.substring(0, cloudOrigin.length() - 1);
+            }
+        }
+
+        public boolean blank() {
+            return cloudOrigin.isBlank();
+        }
     }
 
     public record Cloudflare(

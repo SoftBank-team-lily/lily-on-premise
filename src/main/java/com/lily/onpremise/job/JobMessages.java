@@ -32,12 +32,24 @@ public final class JobMessages {
                     throw new IllegalArgumentException("app 이 올바르지 않습니다");
                 }
                 String id = node.path("id").asText("");
-                return new Inbound(null, app, id.isBlank() ? null : id);
+                return new Inbound(null, app, id.isBlank() ? null : id, null, null);
+            }
+            if ("home".equals(type)) {
+                String app = node.path("app").asText();
+                if (!app.matches("[a-z][a-z0-9-]{0,30}")) {
+                    throw new IllegalArgumentException("app 이 올바르지 않습니다");
+                }
+                String home = node.path("home").asText();
+                if (!home.equals("cloud") && !home.equals("onprem")) {
+                    throw new IllegalArgumentException("home 은 cloud 또는 onprem 입니다");
+                }
+                String id = node.path("id").asText("");
+                return new Inbound(null, null, id.isBlank() ? null : id, app, home);
             }
             if (!"job".equals(type)) {
                 throw new IllegalArgumentException("지원하지 않는 메시지입니다");
             }
-            return new Inbound(MAPPER.treeToValue(node, DeployJob.class).normalize(), null, null);
+            return new Inbound(MAPPER.treeToValue(node, DeployJob.class).normalize(), null, null, null, null);
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
@@ -45,7 +57,7 @@ public final class JobMessages {
         }
     }
 
-    /** job 과 rollbackApp 중 하나만 채워진다 */
-    public record Inbound(DeployJob job, String rollbackApp, String id) {
+    /** job, rollbackApp, homeApp 중 하나만 채워진다 */
+    public record Inbound(DeployJob job, String rollbackApp, String id, String homeApp, String home) {
     }
 }

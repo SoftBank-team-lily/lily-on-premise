@@ -167,7 +167,10 @@ public class WebSocketControlSession implements ControlSession {
         protected void handleTextMessage(WebSocketSession session, TextMessage message) {
             try {
                 JobMessages.Inbound inbound = JobMessages.read(message.getPayload());
-                if (inbound.rollbackApp() != null) {
+                if (inbound.homeApp() != null) {
+                    log.info("home received: app={} home={}", inbound.homeApp(), inbound.home());
+                    jobs.getObject().home(inbound.homeApp(), inbound.home(), inbound.id());
+                } else if (inbound.rollbackApp() != null) {
                     log.info("rollback received: app={}", inbound.rollbackApp());
                     jobs.getObject().rollback(inbound.rollbackApp(), inbound.id());
                 } else {

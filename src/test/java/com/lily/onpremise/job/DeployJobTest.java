@@ -82,6 +82,18 @@ class DeployJobTest {
     }
 
     @Test
+    void 거점_전환_메시지를_읽는다() {
+        JobMessages.Inbound inbound = JobMessages.read(
+                "{\"type\":\"home\",\"app\":\"blog\",\"home\":\"cloud\",\"id\":\"h1234567\"}");
+
+        assertThat(inbound.job()).isNull();
+        assertThat(inbound.rollbackApp()).isNull();
+        assertThat(inbound.homeApp()).isEqualTo("blog");
+        assertThat(inbound.home()).isEqualTo("cloud");
+        assertThat(inbound.id()).isEqualTo("h1234567");
+    }
+
+    @Test
     void 잡이_아닌_메시지는_거절한다() {
         assertThatThrownBy(() -> JobMessages.parse("{\"type\":\"hello\"}"))
                 .isInstanceOf(IllegalArgumentException.class);

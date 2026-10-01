@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
  * 클라우드 Ingress 가 공개 호스트의 요청을 Pod 까지 보내는지 확인한다.
  * Host 헤더를 공개 주소로 넣어야 하므로 java.net.http 대신 소켓으로 보낸다.
  */
-final class IngressProbe {
+public final class IngressProbe {
 
     private static final int TIMEOUT_MILLIS = 2_000;
 
@@ -20,7 +20,7 @@ final class IngressProbe {
     }
 
     /** 응답이 502/503/504 가 아니면 Pod 가 받은 것이다. 연결 실패도 false */
-    static boolean reachesPod(InetSocketAddress ingress, String host) {
+    public static boolean reachesPod(InetSocketAddress ingress, String host) {
         try (Socket socket = new Socket()) {
             socket.connect(ingress, TIMEOUT_MILLIS);
             socket.setSoTimeout(TIMEOUT_MILLIS);

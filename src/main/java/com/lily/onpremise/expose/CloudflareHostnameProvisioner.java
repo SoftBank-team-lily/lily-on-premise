@@ -23,6 +23,8 @@ public final class CloudflareHostnameProvisioner {
     private final String zoneId;
     private final String zoneName;
     private volatile String tunnelId = "";
+    /** 거점이 클라우드이거나 그쪽으로 옮기는 중이면 배포가 CNAME 을 터널로 되돌리지 않는다 */
+    private volatile boolean holdDns;
 
     public CloudflareHostnameProvisioner(CloudflareClient client, AgentProperties.Cloudflare cloudflare) {
         this.client = client;
@@ -63,11 +65,69 @@ public final class CloudflareHostnameProvisioner {
         if (tunnelId.isBlank()) {
             throw new IllegalStateException("cloudflare tunnel 이 아직 없습니다");
         }
-        String hostname = label(appName) + "." + zoneName;
+        String hostname = hostname(appName);
         putIngress(hostname, proxyPort);
-        upsertDns(hostname);
+        if (!holdDns) {
+            point(hostname, tunnelTarget());
+        }
         ensureCertificate(hostname);
         return "https://" + hostname;
+    }
+
+    /** 배포 파이프라인이 CNAME 을 건드리지 않게 한다. 터널 ingress 와 인증서는 그대로 맞춘다 */
+    public void holdDns(boolean hold) {
+        this.holdDns = hold;
+    }
+
+    public String hostname(String appName) {
+        if (zoneName.isBlank()) {
+            throw new IllegalStateException("cloudflare zone 이 없습니다");
+        }
+        return label(appName) + "." + zoneName;
+    }
+
+    public String tunnelTarget() {
+        if (tunnelId.isBlank()) {
+            throw new IllegalStateException("cloudflare tunnel 이 아직 없습니다");
+        }
+        return tunnelId + ".cfargotunnel.com";
+    }
+
+    /** 현재 CNAME 내용물. 레코드가 없으면 빈 문자열 */
+    public String cname(String hostname) {
+        JsonNode current = currentRecord(hostname);
+        return current == null ? "" : current.path("content").asText("");
+    }
+
+    /**
+     * CNAME 내용물만 바꾼다. 호출이 실패하면 예외이고, 레코드는 이전 값이다.
+     * 내용물이 IP 이면 타입을 바꾸게 되므로 거절한다.
+     */
+    public void point(String hostname, String content) {
+        if (content == null || content.isBlank() || ip(content)) {
+            throw new IllegalArgumentException("CNAME 내용물은 호스트 이름이어야 합니다");
+        }
+        JsonNode current = currentRecord(hostname);
+        if (current != null
+                && content.equals(current.path("content").asText())
+                && current.path("proxied").asBoolean(false)) {
+            return;
+        }
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("type", "CNAME");
+        body.put("name", hostname);
+        body.put("content", content);
+        body.put("proxied", true);
+        body.put("ttl", 1);
+        if (current == null) {
+            client.call("POST", "/zones/" + zoneId + "/dns_records", body);
+            return;
+        }
+        client.call("PUT", "/zones/" + zoneId + "/dns_records/" + current.path("id").asText(), body);
+    }
+
+    public static boolean ip(String value) {
+        return value.indexOf(':') >= 0 || value.matches("\\d{1,3}(?:\\.\\d{1,3}){3}");
     }
 
     private JsonNode findTunnel(String name) {
@@ -99,27 +159,10 @@ public final class CloudflareHostnameProvisioner {
         client.call("PUT", "/accounts/" + accountId + "/cfd_tunnel/" + tunnelId + "/configurations", body);
     }
 
-    private void upsertDns(String hostname) {
-        String content = tunnelId + ".cfargotunnel.com";
+    private JsonNode currentRecord(String hostname) {
         JsonNode records = client.call(
                 "GET", "/zones/" + zoneId + "/dns_records?type=CNAME&name=" + encode(hostname), null);
-        JsonNode current = records != null && records.isArray() && !records.isEmpty() ? records.get(0) : null;
-        if (current != null
-                && content.equals(current.path("content").asText())
-                && current.path("proxied").asBoolean(false)) {
-            return;
-        }
-        ObjectNode body = MAPPER.createObjectNode();
-        body.put("type", "CNAME");
-        body.put("name", hostname);
-        body.put("content", content);
-        body.put("proxied", true);
-        body.put("ttl", 1);
-        if (current == null) {
-            client.call("POST", "/zones/" + zoneId + "/dns_records", body);
-            return;
-        }
-        client.call("PUT", "/zones/" + zoneId + "/dns_records/" + current.path("id").asText(), body);
+        return records != null && records.isArray() && !records.isEmpty() ? records.get(0) : null;
     }
 
     private void ensureCertificate(String hostname) {

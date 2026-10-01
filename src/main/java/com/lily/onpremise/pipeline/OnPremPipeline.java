@@ -45,6 +45,7 @@ public final class OnPremPipeline {
     private final DatabaseAccess databases;
     private final SchemaApply schema;
     private final CandidateJudge judge;
+    private final DeployedApp deployed;
 
     public OnPremPipeline(
             Workspace workspace,
@@ -57,7 +58,7 @@ public final class OnPremPipeline {
             int bluePort,
             int greenPort) {
         this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
-                DatabaseAccess.NONE, SchemaApply.NONE, CandidateJudge.PASS);
+                DatabaseAccess.NONE, SchemaApply.NONE, CandidateJudge.PASS, DeployedApp.IGNORE);
     }
 
     public OnPremPipeline(
@@ -72,7 +73,7 @@ public final class OnPremPipeline {
             int greenPort,
             DatabaseAccess databases) {
         this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
-                databases, SchemaApply.NONE, CandidateJudge.PASS);
+                databases, SchemaApply.NONE, CandidateJudge.PASS, DeployedApp.IGNORE);
     }
 
     public OnPremPipeline(
@@ -88,9 +89,28 @@ public final class OnPremPipeline {
             DatabaseAccess databases,
             SchemaApply schema,
             CandidateJudge judge) {
+        this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
+                databases, schema, judge, DeployedApp.IGNORE);
+    }
+
+    public OnPremPipeline(
+            Workspace workspace,
+            StackAnalyzer analyzer,
+            ContainerRuntime runtime,
+            Readiness readiness,
+            TrafficSwitch traffic,
+            PublicAddress addresses,
+            SlotBook slots,
+            int bluePort,
+            int greenPort,
+            DatabaseAccess databases,
+            SchemaApply schema,
+            CandidateJudge judge,
+            DeployedApp deployed) {
         this.databases = databases;
         this.schema = schema == null ? SchemaApply.NONE : schema;
         this.judge = judge == null ? CandidateJudge.PASS : judge;
+        this.deployed = deployed == null ? DeployedApp.IGNORE : deployed;
         this.workspace = workspace;
         this.analyzer = analyzer;
         this.runtime = runtime;
@@ -236,6 +256,7 @@ public final class OnPremPipeline {
 
         record.url(published);
         record.activeSlot(target.name().toLowerCase());
+        deployed.note(job, plan.origin() == DockerfilePlan.Origin.EXISTING);
         stage(record, publish, JobRecord.Status.SUCCEEDED, "done: " + published);
     }
 
@@ -288,7 +309,7 @@ public final class OnPremPipeline {
     }
 
     /** tcp 헬스는 5xx 를 볼 경로가 없으므로 클라우드와 같이 / 를 본다 */
-    static String probePath(String canary, String health) {
+    public static String probePath(String canary, String health) {
         String path = canary != null && !canary.isBlank() ? canary : health;
         if (path == null || "tcp".equalsIgnoreCase(path.trim())) {
             return "/";

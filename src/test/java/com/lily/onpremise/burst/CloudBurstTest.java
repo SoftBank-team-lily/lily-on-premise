@@ -51,6 +51,41 @@ class CloudBurstTest {
     }
 
     @Test
+    void 대기_배포가_끝나면_리스너_뒤에도_대기_Pod_를_띄운다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+        List<String> seen = new ArrayList<>();
+        burst.whenStandby(job -> seen.add(job.id()));
+
+        burst.onDeployed(new DeployJob("j1", "https://github.com/a/b", "main", null, "blog", 8080,
+                "/health", null, null, Map.of()));
+        for (int i = 0; i < 100 && burst.status().phase() == CloudBurst.Phase.STANDBY; i++) {
+            Thread.sleep(10);
+        }
+
+        assertThat(seen).containsExactly("j1");
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.WARMING);
+        assertThat(client.scales).containsExactly(1);
+
+        client.ready = 1;
+        burst.tick(idle(), at(1));
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.IDLE);
+        assertThat(proxy.overflowing()).isTrue();
+    }
+
+    @Test
+    void 스케일이_막혀_있으면_틱이_레플리카를_바꾸지_않는다() throws Exception {
+        CloudBurst burst = warmed();
+        int before = client.scales.size();
+
+        burst.allowScale(() -> false);
+        burst.tick(saturated(1), at(10));
+        burst.tick(saturated(2), at(20));
+
+        assertThat(client.scales).hasSize(before);
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.IDLE);
+    }
+
+    @Test
     void 대기_Pod_가_있으면_과부하_때_SCALING_없이_바로_OVERFLOWING() throws Exception {
         CloudBurst burst = warmed();
 
