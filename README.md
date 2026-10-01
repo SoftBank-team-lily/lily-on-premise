@@ -647,7 +647,7 @@ SPRING_PROFILES_ACTIVE=local
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
 | `BURST_ENABLED` | `false` | |
-| `BURST_BUILDER_URL` | | lily-builder 공개 주소. 예: `http://builder.43.200.152.53.nip.io` |
+| `BURST_BUILDER_URL` | | lily-builder 공개 주소. 예: `https://builder.apps.lilycloud.kr` |
 | `BURST_API_TOKEN` | | lily-builder 의 `BURST_API_TOKEN` (k3s Secret `lily-system/lily-burst`) |
 | `BURST_INGRESS_HOST` / `BURST_INGRESS_PORT` | / `80` | 넘길 클라우드 Ingress |
 | `BURST_PUBLIC_HOST` | `{app}.{zone}` | 사용자가 여는 호스트. `{app}` 은 앱 이름 |
