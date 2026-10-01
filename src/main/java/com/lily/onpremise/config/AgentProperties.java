@@ -30,6 +30,23 @@ public record AgentProperties(
         @DefaultValue Cutover cutover) {
 
     /**
+     * 플랫폼 연결. 컨트롤 플레인 주소만 있고 Cloudflare 자격(API 토큰, 터널 토큰)이 없으면
+     * 공개 주소는 컨트롤 플레인이 플랫폼 존에 만들어 준다.
+     */
+    public boolean platformExposure() {
+        return controlPlaneUrl != null && !controlPlaneUrl.isBlank()
+                && cloudflare != null && cloudflare.enabled()
+                && !cloudflare.apiConfigured() && !cloudflare.partialApi()
+                && (cloudflare.token() == null || cloudflare.token().isBlank());
+    }
+
+    /** 플랫폼 연결로 DB 터널 인증서를 받는다. 이 머신에 DB 터널 설정이 있으면 그것을 쓴다 */
+    public boolean platformDatabase() {
+        return controlPlaneUrl != null && !controlPlaneUrl.isBlank()
+                && (database == null || !database.configured());
+    }
+
+    /**
      * 온프레미스 앱이 클라우드와 같은 RDS 를 쓰도록 SSH 포트포워딩 터널을 연다.
      * 배스천 계정은 RDS 포트로의 포워딩만 허용된다 (셸 없음). DB 계정·비밀번호는 lily-builder 를 거쳐 받는다.
      *

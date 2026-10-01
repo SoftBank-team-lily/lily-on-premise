@@ -1,3 +1,4 @@
 # gradlew 는 리눅스에서도 실행하므로 Windows 에서 받아도 LF 로 둔다
 gradlew text eol=lf
 *.bat text eol=crlf
+scripts/*.sh text eol=lf
