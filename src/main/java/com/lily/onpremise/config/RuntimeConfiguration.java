@@ -6,14 +6,18 @@ import com.lily.onpremise.burst.BurstClient;
 import com.lily.onpremise.burst.CloudDatabase;
 import com.lily.onpremise.burst.DatabaseTunnel;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lily.onpremise.expose.CandidateJudge;
 import com.lily.onpremise.expose.CloudflareHostnameProvisioner;
 import com.lily.onpremise.expose.HealthProbe;
+import com.lily.onpremise.expose.LoopbackCandidateJudge;
 import com.lily.onpremise.expose.HttpCloudflareClient;
 import com.lily.onpremise.expose.LocalExposure;
 import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
 import com.lily.onpremise.pipeline.DatabaseAccess;
 import com.lily.onpremise.pipeline.OnPremPipeline;
+import com.lily.onpremise.schema.FlywaySchemaApply;
+import com.lily.onpremise.schema.SchemaApply;
 import com.lily.onpremise.runtime.CliContainerRuntime;
 import com.lily.onpremise.runtime.ContainerRuntime;
 import com.lily.onpremise.runtime.SlotBook;
@@ -48,6 +52,17 @@ public class RuntimeConfiguration {
     @Bean
     ContainerRuntime containerRuntime(Commands commands) {
         return new CliContainerRuntime(commands);
+    }
+
+    @Bean
+    SchemaApply schemaApply() {
+        return new FlywaySchemaApply();
+    }
+
+    @Bean
+    CandidateJudge candidateJudge() {
+        return new LoopbackCandidateJudge(
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build());
     }
 
     @Bean
@@ -111,9 +126,11 @@ public class RuntimeConfiguration {
             PublicAddress publicAddress,
             SlotBook slots,
             AgentProperties properties,
-            DatabaseAccess databases) {
+            DatabaseAccess databases,
+            SchemaApply schema,
+            CandidateJudge judge) {
         return new OnPremPipeline(
                 workspace, analyzer, runtime, readiness, exposure, publicAddress, slots,
-                properties.bluePort(), properties.greenPort(), databases);
+                properties.bluePort(), properties.greenPort(), databases, schema, judge);
     }
 }

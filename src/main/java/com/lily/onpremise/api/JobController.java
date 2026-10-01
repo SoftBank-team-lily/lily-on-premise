@@ -41,6 +41,12 @@ public class JobController {
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(service.accept(job));
     }
 
+    /** 직전 슬롯으로 프록시를 되돌린다. 스키마는 그대로 둔다 */
+    @PostMapping("/api/apps/{appName}/rollback")
+    public ResponseEntity<JobRecord> rollback(@PathVariable String appName) {
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(service.rollback(appName, null));
+    }
+
     @GetMapping("/api/jobs")
     public List<JobRecord> history() {
         return service.history();

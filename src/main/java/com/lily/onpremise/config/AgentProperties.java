@@ -19,7 +19,8 @@ public record AgentProperties(
         @DefaultValue("8099") int proxyPort,
         @DefaultValue("18080") int bluePort,
         @DefaultValue("18081") int greenPort,
-        @DefaultValue("120") int healthTimeoutSeconds,
+        /** 클라우드 기동 프로브(5초 × 36)와 같은 180초 */
+        @DefaultValue("180") int healthTimeoutSeconds,
         @DefaultValue("") String publicUrl,
         @DefaultValue("") String workspace,
         @DefaultValue Cloudflare cloudflare,

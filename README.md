@@ -155,9 +155,11 @@ else:
 트래픽을 받는 컨테이너를 제외한 나머지 컨테이너를 정리
 
 docker build
+schema migrate (스크립트가 있을 때, 후보를 띄우기 전)
 docker run (target, 127.0.0.1:targetPort)
 
-wait health(120s)
+wait health(180s)
+judge candidate (이전 슬롯이 있을 때, 루프백만)
 
 hostname.ensure(app)
     ingress: https://{app}.{zone} → http://127.0.0.1:{proxyPort}
@@ -300,7 +302,7 @@ Active Slot은 프록시 upstream이 가리키는 루프백 포트입니다.
 컨테이너를 기동한 뒤에 실행됩니다.
 
 * 프록시를 거치지 않고 후보 슬롯의 루프백 포트에 HTTP GET을 보냅니다
-* 2xx가 올 때까지 기다립니다. 기본 제한 시간은 120초입니다
+* 2xx가 올 때까지 기다립니다. 기본 제한 시간은 180초입니다. 클라우드 기동 프로브(5초 간격, 36회)와 같은 예산입니다
 * 시간이 초과되면 후보 컨테이너를 삭제하고 배포를 중단합니다
 
 ### Exposure
@@ -544,7 +546,7 @@ WebSocket 없이 같은 파이프라인을 실행할 때 사용합니다. 본문
 | `AGENT_PROXY_PORT`             | `8099`  | 터널이 연결되는 포트입니다. 슬롯 포트와 다릅니다            |
 | `AGENT_BLUE_PORT`              | `18080` | blue 슬롯입니다. 루프백만 엽니다                    |
 | `AGENT_GREEN_PORT`             | `18081` | green 슬롯입니다. 루프백만 엽니다                   |
-| `AGENT_HEALTH_TIMEOUT_SECONDS` | `120`   | Ready를 기다리는 시간(초)입니다                    |
+| `AGENT_HEALTH_TIMEOUT_SECONDS` | `180`   | Ready를 기다리는 시간(초)입니다. 클라우드 기동 프로브와 같습니다 |
 | `PUBLIC_URL`                   | 비움      | API 없이 named tunnel을 쓸 때의 고정 주소입니다     |
 | `CLOUDFLARE_ENABLED`           | `false` | API 없이 cloudflared를 실행하려면 `true`입니다    |
 | `CLOUDFLARE_TUNNEL_TOKEN`      | 비움      | API 없이, 이미 만든 터널의 토큰입니다                 |

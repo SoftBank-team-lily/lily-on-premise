@@ -52,6 +52,36 @@ class DeployJobTest {
     }
 
     @Test
+    void tcp_헬스와_마이그레이션을_받는다() {
+        DeployJob job = new DeployJob(
+                "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "tcp", null, null, Map.of(), "postgres", "/ready",
+                Map.of("V1__init.sql", "select 1")).normalize();
+
+        assertThat(job.healthPath()).isEqualTo("tcp");
+        assertThat(job.canaryPath()).isEqualTo("/ready");
+        assertThat(job.migrations()).containsEntry("V1__init.sql", "select 1");
+    }
+
+    @Test
+    void 마이그레이션_파일명이_아니면_거절한다() {
+        assertThatThrownBy(() -> new DeployJob(
+                "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/", null, null, Map.of(), null, null, Map.of("notes.sql", "select 1")).normalize())
+                .hasMessageContaining("migrations");
+    }
+
+    @Test
+    void 롤백_메시지를_읽는다() {
+        JobMessages.Inbound inbound = JobMessages.read(
+                "{\"type\":\"rollback\",\"app\":\"blog\",\"id\":\"r1234567\"}");
+
+        assertThat(inbound.job()).isNull();
+        assertThat(inbound.rollbackApp()).isEqualTo("blog");
+        assertThat(inbound.id()).isEqualTo("r1234567");
+    }
+
+    @Test
     void 잡이_아닌_메시지는_거절한다() {
         assertThatThrownBy(() -> JobMessages.parse("{\"type\":\"hello\"}"))
                 .isInstanceOf(IllegalArgumentException.class);

@@ -15,16 +15,37 @@ public final class JobMessages {
     }
 
     public static DeployJob parse(String json) {
+        Inbound inbound = read(json);
+        if (inbound.job() == null) {
+            throw new IllegalArgumentException("지원하지 않는 메시지입니다");
+        }
+        return inbound.job();
+    }
+
+    public static Inbound read(String json) {
         try {
             JsonNode node = MAPPER.readTree(json);
-            if (!"job".equals(node.path("type").asText())) {
+            String type = node.path("type").asText();
+            if ("rollback".equals(type)) {
+                String app = node.path("app").asText();
+                if (!app.matches("[a-z][a-z0-9-]{0,30}")) {
+                    throw new IllegalArgumentException("app 이 올바르지 않습니다");
+                }
+                String id = node.path("id").asText("");
+                return new Inbound(null, app, id.isBlank() ? null : id);
+            }
+            if (!"job".equals(type)) {
                 throw new IllegalArgumentException("지원하지 않는 메시지입니다");
             }
-            return MAPPER.treeToValue(node, DeployJob.class).normalize();
+            return new Inbound(MAPPER.treeToValue(node, DeployJob.class).normalize(), null, null);
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
             throw new IllegalArgumentException("잡 메시지를 읽지 못했습니다");
         }
+    }
+
+    /** job 과 rollbackApp 중 하나만 채워진다 */
+    public record Inbound(DeployJob job, String rollbackApp, String id) {
     }
 }

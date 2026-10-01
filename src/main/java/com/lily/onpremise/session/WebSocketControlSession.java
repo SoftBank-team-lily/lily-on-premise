@@ -118,7 +118,7 @@ public class WebSocketControlSession implements ControlSession {
             closed.set(latch);
             try {
                 WebSocketContainer container = ContainerProvider.getWebSocketContainer();
-                container.setDefaultMaxTextMessageBufferSize(256 * 1024);
+                container.setDefaultMaxTextMessageBufferSize(2 * 1024 * 1024);
                 StandardWebSocketClient client = new StandardWebSocketClient(container);
                 client.execute(new Handler(), url).get(15, TimeUnit.SECONDS);
                 latch.await();
@@ -166,11 +166,17 @@ public class WebSocketControlSession implements ControlSession {
         @Override
         protected void handleTextMessage(WebSocketSession session, TextMessage message) {
             try {
-                DeployJob job = JobMessages.parse(message.getPayload());
-                log.info("job received: id={} app={}", job.id(), job.appName());
-                jobs.getObject().accept(job);
+                JobMessages.Inbound inbound = JobMessages.read(message.getPayload());
+                if (inbound.rollbackApp() != null) {
+                    log.info("rollback received: app={}", inbound.rollbackApp());
+                    jobs.getObject().rollback(inbound.rollbackApp(), inbound.id());
+                } else {
+                    DeployJob job = inbound.job();
+                    log.info("job received: id={} app={}", job.id(), job.appName());
+                    jobs.getObject().accept(job);
+                }
             } catch (RuntimeException e) {
-                log.warn("rejected job: {}", e.getMessage());
+                log.warn("rejected message: {}", e.getMessage());
             }
         }
 

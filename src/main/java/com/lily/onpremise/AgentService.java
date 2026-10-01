@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * 잡 하나를 받아 파이프라인을 돌리고, 단계마다 로컬 저장소와 컨트롤 플레인에 알린다.
@@ -52,6 +53,31 @@ public class AgentService implements JobSink {
             if (record.getStatus() == JobRecord.Status.SUCCEEDED) {
                 // 클라우드 버스팅이 켜져 있으면 같은 앱을 클라우드에 대기 배포한다
                 burst.onDeployed(job);
+            }
+        });
+        return record;
+    }
+
+    @Override
+    public JobRecord rollback(String app, String id) {
+        if (app == null || !app.matches("[a-z][a-z0-9-]{0,30}")) {
+            throw new IllegalArgumentException("app 이 올바르지 않습니다");
+        }
+        String idValue = id == null || id.isBlank()
+                ? "r" + UUID.randomUUID().toString().replace("-", "").substring(0, 7)
+                : id;
+        if (!idValue.matches("[a-z0-9][a-z0-9-]{0,40}")) {
+            throw new IllegalArgumentException("id 가 올바르지 않습니다");
+        }
+        if (store.find(idValue).isPresent()) {
+            throw new IllegalArgumentException("이미 받은 잡입니다: " + idValue);
+        }
+        JobRecord record = new JobRecord(idValue, app);
+        record.update(JobRecord.Status.QUEUED, "rollback: " + app);
+        publish(record);
+        runner.run(() -> {
+            synchronized (gate) {
+                pipeline.rollback(record, app, this::publish);
             }
         });
         return record;

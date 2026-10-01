@@ -16,7 +16,8 @@ lily:
     proxy-port: ${AGENT_PROXY_PORT:8099}
     blue-port: ${AGENT_BLUE_PORT:18080}
     green-port: ${AGENT_GREEN_PORT:18081}
-    health-timeout-seconds: ${AGENT_HEALTH_TIMEOUT_SECONDS:120}
+    # 클라우드 기동 프로브(period 5s × failureThreshold 36)와 같은 예산
+    health-timeout-seconds: ${AGENT_HEALTH_TIMEOUT_SECONDS:180}
     # API 자격 없이 이미 만들어 둔 named tunnel 을 쓸 때의 고정 주소
     public-url: ${PUBLIC_URL:}
     workspace: ${AGENT_WORKSPACE:}

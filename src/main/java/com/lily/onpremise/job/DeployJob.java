@@ -24,12 +24,20 @@ public record DeployJob(
         String rootDir,
         String dockerfile,
         Map<String, String> env,
-        String database) {
+        String database,
+        String canaryPath,
+        Map<String, String> migrations) {
 
     /** DB 없이 배포 */
     public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
                      String healthPath, String rootDir, String dockerfile, Map<String, String> env) {
         this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, null);
+    }
+
+    /** 판정 경로와 마이그레이션 없이 배포 */
+    public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
+                     String healthPath, String rootDir, String dockerfile, Map<String, String> env, String database) {
+        this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database, null, null);
     }
 
     public DeployJob normalize() {
@@ -56,8 +64,17 @@ public record DeployJob(
         }
 
         String health = blankToNull(healthPath);
-        if (health != null && (!health.startsWith("/") || health.contains(" ") || health.contains(".."))) {
+        if (health != null && !"tcp".equalsIgnoreCase(health)
+                && (!health.startsWith("/") || health.contains(" ") || health.contains(".."))) {
             throw new IllegalArgumentException("healthPath 는 / 로 시작해야 합니다");
+        }
+        if ("tcp".equalsIgnoreCase(health)) {
+            health = "tcp";
+        }
+
+        String canary = blankToNull(canaryPath);
+        if (canary != null && (!canary.startsWith("/") || canary.contains(" ") || canary.contains(".."))) {
+            throw new IllegalArgumentException("canaryPath 는 / 로 시작해야 합니다");
         }
 
         String dir = blankToNull(rootDir);
@@ -90,7 +107,9 @@ public record DeployJob(
                 dir,
                 blankToNull(file),
                 cleanEnv(env),
-                engine);
+                engine,
+                canary,
+                cleanMigrations(migrations));
     }
 
     private static URI parseRepo(String repo) {
@@ -143,6 +162,30 @@ public record DeployJob(
             }
             clean.put(key, value);
         });
+        return Map.copyOf(clean);
+    }
+
+    private static Map<String, String> cleanMigrations(Map<String, String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return Map.of();
+        }
+        if (raw.size() > 64) {
+            throw new IllegalArgumentException("migrations 가 너무 많습니다");
+        }
+        Map<String, String> clean = new LinkedHashMap<>();
+        int bytes = 0;
+        for (Map.Entry<String, String> entry : raw.entrySet()) {
+            String name = entry.getKey();
+            if (name == null || !name.matches("[VUR][^/\\\\]*__[^/\\\\]*\\.sql") || name.contains("..")) {
+                throw new IllegalArgumentException("migrations 파일명이 올바르지 않습니다");
+            }
+            String sql = entry.getValue() == null ? "" : entry.getValue();
+            bytes += sql.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (bytes > 900 * 1024) {
+                throw new IllegalArgumentException("migrations 합계가 900KiB 를 넘습니다");
+            }
+            clean.put(name, sql);
+        }
         return Map.copyOf(clean);
     }
 

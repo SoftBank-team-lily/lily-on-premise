@@ -1,9 +1,12 @@
 package com.lily.onpremise.pipeline;
 
 import com.lily.onpremise.analyze.StackAnalyzer;
+import com.lily.onpremise.expose.CandidateJudge;
 import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
 import com.lily.onpremise.expose.TrafficSwitch;
+import com.lily.onpremise.pipeline.DatabaseAccess;
+import com.lily.onpremise.schema.SchemaApply;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobRecord;
 import com.lily.onpremise.runtime.ContainerRuntime;
@@ -17,6 +20,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -185,6 +190,102 @@ class OnPremPipelineTest {
         assertThat(runtime.lastContainerPort).isEqualTo(3000);
     }
 
+    @Test
+    void 스키마는_후보를_띄우기_전에_적용한다() throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
+        OnPremPipeline withSchema = new OnPremPipeline(
+                job -> root, new StackAnalyzer(), runtime, ready, traffic, addresses, new SlotBook(), 18080, 18081,
+                job -> Map.of("DB_URL", "jdbc:postgresql://127.0.0.1:5432/blog", "DB_USERNAME", "u", "DB_PASSWORD", "p"),
+                (env, scripts) -> {
+                    assertThat(env).containsEntry("DB_URL", "jdbc:postgresql://127.0.0.1:5432/blog");
+                    assertThat(scripts).containsEntry("V1__init.sql", "create table t(id int)");
+                    runtime.calls.add("schema");
+                },
+                CandidateJudge.PASS);
+
+        JobRecord record = recordOf(withSchema, new DeployJob(
+                "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/health", null, null, Map.of(), "postgres", null,
+                Map.of("V1__init.sql", "create table t(id int)")).normalize());
+
+        assertThat(record.getStatus()).isEqualTo(JobRecord.Status.SUCCEEDED);
+        assertThat(runtime.calls).contains("schema", "start blog-blue");
+        assertThat(runtime.calls.indexOf("schema")).isLessThan(runtime.calls.indexOf("start blog-blue"));
+        assertThat(runtime.lastEnv).containsEntry("SPRING_FLYWAY_ENABLED", "false");
+    }
+
+    @Test
+    void 스키마가_실패하면_후보를_띄우지_않는다() throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
+        SchemaApply schema = (env, scripts) -> {
+            throw new IllegalStateException("schema failed, traffic unchanged: boom");
+        };
+        OnPremPipeline withSchema = new OnPremPipeline(
+                job -> root, new StackAnalyzer(), runtime, ready, traffic, addresses, new SlotBook(), 18080, 18081,
+                job -> Map.of("DB_URL", "jdbc:postgresql://127.0.0.1:1/blog", "DB_USERNAME", "u", "DB_PASSWORD", "p"),
+                schema, CandidateJudge.PASS);
+
+        JobRecord record = recordOf(withSchema, new DeployJob(
+                "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/health", null, null, Map.of(), "postgres", null,
+                Map.of("V1__init.sql", "select 1")).normalize());
+
+        assertThat(record.getStatus()).isEqualTo(JobRecord.Status.FAILED);
+        assertThat(runtime.calls).doesNotContain("start blog-blue");
+        assertThat(traffic.port).isEqualTo(-1);
+        assertThat(record.getLogs()).anyMatch(line -> line.contains("traffic unchanged"));
+    }
+
+    @Test
+    void 이전_슬롯이_있으면_전환_전에_후보를_거절하면_프록시는_그대로다() throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
+        AtomicInteger judged = new AtomicInteger();
+        CandidateJudge judge = (candidate, active, path) -> {
+            judged.incrementAndGet();
+            assertThat(candidate).isEqualTo(18081);
+            assertThat(active).isEqualTo(18080);
+            assertThat(path).isEqualTo("/ready");
+            return Optional.of("error rate 100.0% > 5.0%");
+        };
+        OnPremPipeline judgedPipeline = new OnPremPipeline(
+                job -> root, new StackAnalyzer(), runtime, ready, traffic, addresses, slots, 18080, 18081,
+                DatabaseAccess.NONE, SchemaApply.NONE, judge);
+
+        run(judgedPipeline, job("blog", "/health", null));
+        JobRecord second = run(judgedPipeline, new DeployJob(
+                "job2", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/health", null, null, Map.of(), null, "/ready", Map.of()).normalize());
+
+        assertThat(judged).hasValue(1);
+        assertThat(second.getStatus()).isEqualTo(JobRecord.Status.FAILED);
+        assertThat(second.getLogs()).anyMatch(line -> line.contains("judge rejected"));
+        assertThat(traffic.port).isEqualTo(18080);
+        assertThat(runtime.calls).contains("start blog-green", "stop blog-green");
+    }
+
+    @Test
+    void 롤백은_직전_이미지를_다시_띄우고_프록시를_되돌린다() throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
+        run(job("blog", "/health", null));
+        run(new DeployJob(
+                "job2", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/health", null, null, Map.of()).normalize());
+
+        JobRecord rollback = new JobRecord("rb1", "blog");
+        pipeline.rollback(rollback, "blog", ignored -> { });
+
+        assertThat(rollback.getStatus()).isEqualTo(JobRecord.Status.SUCCEEDED);
+        assertThat(rollback.getActiveSlot()).isEqualTo("blue");
+        assertThat(traffic.port).isEqualTo(18080);
+        assertThat(runtime.lastImage).isEqualTo("lily-onprem/blog:job1");
+        assertThat(runtime.lastEnv).containsEntry("APP_COLOR", "blue").containsEntry("APP_VERSION", "job1");
+        assertThat(runtime.calls).contains("stop blog-green");
+    }
+
+    private JobRecord run(OnPremPipeline pipeline, DeployJob job) {
+        return recordOf(pipeline, job);
+    }
+
     private JobRecord run(DeployJob job) {
         return recordOf(pipeline, job);
     }
@@ -204,6 +305,7 @@ class OnPremPipelineTest {
     static final class FakeRuntime implements ContainerRuntime {
         final List<String> calls = new ArrayList<>();
         Map<String, String> lastEnv = Map.of();
+        String lastImage;
         int lastPort;
         int lastContainerPort;
         String failStop;
@@ -216,6 +318,7 @@ class OnPremPipelineTest {
         @Override
         public void start(String name, String image, int hostPort, int containerPort, Map<String, String> env) {
             calls.add("start " + name);
+            lastImage = image;
             lastEnv = env;
             lastPort = hostPort;
             lastContainerPort = containerPort;

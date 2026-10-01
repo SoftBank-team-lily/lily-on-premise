@@ -10,7 +10,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public final class JobRecord {
 
     public enum Status {
-        QUEUED, CHECKOUT, ANALYZE, BUILDING, STARTING, HEALTH, SWITCHING, SUCCEEDED, FAILED
+        QUEUED, CHECKOUT, ANALYZE, BUILDING, STARTING, HEALTH, JUDGING, SWITCHING, SUCCEEDED, FAILED
     }
 
     private final String id;
@@ -23,6 +23,18 @@ public final class JobRecord {
     private volatile Status status;
     private volatile String url;
     private volatile String activeSlot;
+
+    /** 슬롯을 되돌릴 때. 레포를 다시 받지 않는다 */
+    public JobRecord(String id, String appName) {
+        this.id = id;
+        this.appName = appName;
+        this.repoUrl = "";
+        this.branch = "";
+        this.createdAt = Instant.now();
+        this.updatedAt = this.createdAt;
+        this.status = Status.QUEUED;
+        this.logs = new CopyOnWriteArrayList<>();
+    }
 
     public JobRecord(DeployJob job) {
         this.id = job.id();
