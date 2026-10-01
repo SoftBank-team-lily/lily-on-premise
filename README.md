@@ -595,10 +595,13 @@ SPRING_PROFILES_ACTIVE=local
 | 단계 | 조건 | 동작 |
 |---|---|---|
 | STANDBY | 온프레미스 배포 성공 | lily-builder `/api/burst` 로 같은 레포를 클라우드에 빌드·배포하고 레플리카 0 으로 대기. Ingress 호스트는 공개 주소와 같다 |
-| IDLE | 대기 완료 | 로컬만 처리 |
-| SCALING | 로컬 처리 중 요청이 한도 이상인 채로 `scaleUpAfterSeconds` 초 | 클라우드 레플리카 `replicas` 로 |
-| OVERFLOWING | 클라우드 Ready 1 이상 | 로컬이 한도에 닿으면 그 요청을 클라우드로 (헤더 그대로, Host 유지) |
-| IDLE | `cooldownSeconds` 초 동안 한가 | 넘김 끄고 클라우드 0 |
+| WARMING | 대기 배포 완료 | 클라우드 레플리카 `warmReplicas` 로. Ingress 로 Pod 까지 닿으면 넘김을 켠다 (`warmReplicas` 0 이면 건너뜀) |
+| IDLE | 대기 완료 | 로컬이 한도 안에서 처리. 대기 Pod 가 있으면 한도를 넘는 요청은 바로 클라우드로 |
+| SCALING | 대기 Pod 없이 로컬 처리 중 요청이 한도 이상인 채로 `scaleUpAfterSeconds` 초 | 클라우드 레플리카 `replicas` 로 |
+| OVERFLOWING | 클라우드 Ready 1 이상, 또는 대기 Pod 가 있는 상태에서 과부하 | 로컬이 한도에 닿으면 그 요청을 클라우드로 (헤더 그대로, Host 유지). 대기 Pod 가 있으면 SCALING 없이 바로 여기로 오고 레플리카만 `replicas` 로 올린다 |
+| IDLE | `cooldownSeconds` 초 동안 한가 | 클라우드를 `warmReplicas` 로. 대기 Pod 가 없으면 넘김 끄고 0 |
+
+대기 Pod 를 두는 이유: 0 에서 띄우면 Spring 앱 기준 Ingress 가 Pod 까지 닿는 데 20~40초 걸리고, 그동안 넘기지 못한다. 대기 Pod 가 180초 안에 안 뜨면 0 으로 내리고 넘길 때 띄우는 방식으로 동작한다.
 
 - 상태: `GET /api/burst` (단계, 로컬·클라우드 처리 중 요청, 최근 이벤트)
 - 요청 단위로 나눈다. cloudflared 는 keep-alive 연결 몇 개에 요청을 몰아 보내므로 연결 단위로는 분배를 정할 수 없다
@@ -618,6 +621,7 @@ SPRING_PROFILES_ACTIVE=local
 | `BURST_SCALE_UP_AFTER_SECONDS` | `3` | |
 | `BURST_COOLDOWN_SECONDS` | `30` | |
 | `BURST_REPLICAS` | `2` | DB 를 붙이면 (로컬 1 + 클라우드 N) x 풀 3 이 20 이하 |
+| `BURST_WARM_REPLICAS` | `1` | 평소에 띄워 둘 클라우드 Pod. 0 이면 넘길 때 띄운다 (Pod 당 놀 때 메모리 약 280Mi) |
 | `BURST_DATABASE` | | 클라우드 대기 배포에 붙일 DB (`postgres` / `mysql`) |
 
 검증 (2026-09-30): 로컬 한도 4, 동시 16 연결로 60초 부하 → 3초 뒤 클라우드 2 Pod 로 스케일, 약 16초 뒤 넘김 시작, 부하 종료 20초 뒤 0 으로. 2,822 요청 모두 200.
