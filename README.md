@@ -475,20 +475,35 @@ CONTROL_PLANE_URL=wss://builder.apps.lilycloud.kr/api/agents/connect?token=... j
 
 ### lily 화면(내 PC)에서 배포하기
 
-lily-frontend `/account` 에서 배포 위치를 "내 PC" 로 고르고 "연결 토큰 받기" 를 누르면 실행 명령이 나옵니다.
+lily-frontend `/account` 에서 배포 위치를 "내 PC" 로 고르고 "연결 토큰 받기" 를 누르면 실행 명령 한 줄이 나옵니다. 사용자가 할 일은 Docker 설치와 이 명령 실행뿐입니다.
 
 ```text
-git clone https://github.com/SoftBank-team-lily/lily-on-premise && cd lily-on-premise
-LILY_AGENT_TOKEN=<화면의 토큰> ./scripts/agent.sh
+docker rm -f lily-agent; docker run -d --name lily-agent --restart unless-stopped --network host -v //var/run/docker.sock:/var/run/docker.sock -e CONTROL_PLANE_URL="wss://builder.apps.lilycloud.kr/api/agents/connect?token=<화면의 토큰>" public.ecr.aws/x3w9c9r7/lily-agent
 ```
 
-* `scripts/agent.sh` 는 `test/burst/agent.Dockerfile` 로 에이전트 이미지를 만들고 `--network host` 로 띄웁니다. 필요한 것은 Docker 뿐입니다
+* 이미지는 공개 레지스트리에 있어 레포 클론·로컬 빌드가 없습니다 (`scripts/publish-agent.sh` 로 올립니다)
+* PowerShell, bash(Git Bash 포함)에서 그대로 실행됩니다. Docker Desktop 의 host networking 설정은 켜지 않아도 됩니다 (에이전트와 앱 컨테이너는 Docker VM 안에서 서로 닿습니다)
 * 화면에 "연결됨" 이 보이면 레포를 등록합니다. 상태는 목록에 "내 PC · 배포 중 → 배포 완료" 로 바뀌고 "앱 열기" 가 생깁니다
-* 공개 주소: `test/burst/cloudflare.env` 가 있으면 플랫폼 존 주소, 없으면 quick tunnel(`trycloudflare.com`)
-* DB: `test/burst/burst.env` 와 `keys/` 가 있으면 DB 터널을 엽니다. 없는데 레포가 DB 드라이버를 쓰면 lily-builder 가 잡을 보내지 않고 이유와 함께 실패시킵니다
-* hello 의 `database` 는 DB 터널이 설정됐는지입니다 (컨트롤 플레인이 DB 가 필요한 잡을 보낼지 정합니다)
 * 에이전트 하나는 앱 하나만 띄웁니다. 화면에서도 내 PC 프로젝트는 계정당 하나입니다
-* 로그 `./scripts/agent.sh logs`, 중지 `./scripts/agent.sh stop`
+* 로그 `docker logs -f lily-agent`, 중지 `docker rm -f lily-agent`
+
+#### 플랫폼 연결 (토큰 하나로 공개 주소와 DB)
+
+사용자 PC 에는 에이전트 토큰만 있습니다. Cloudflare API 토큰과 DB 터널 개인키는 나눠 주지 않고, 컨트롤 플레인(lily-builder)이 같은 소켓으로 대신합니다.
+
+```text
+에이전트 → hello   {..., "platform": true, "sshPublicKey": "ssh-ed25519 ...", "databaseHost": "172.17.0.1", "databasePort": 15432}
+builder  → welcome {"tunnelAgentId": "agent-{key}", "cloudflare": {accountId, zoneId, zoneName}, "database": {sshHost, sshUser, remoteHost, remotePort, certificate}}
+에이전트 → cloudflare {"rid": "..", "method": "PUT", "path": "/accounts/../cfd_tunnel/../configurations", "body": {...}}
+builder  → cloudflare {"rid": "..", "ok": true, "result": {...}}
+builder  → job     {..., "database": "postgres", "databaseEnv": {"DB_URL": "jdbc:postgresql://172.17.0.1:15432/...", ...}}
+```
+
+* 공개 주소: 터널 `lily-agent-{key}` 와 `https://{앱}.{zone}`. builder 는 이 에이전트의 터널, 이 에이전트로 배포한 앱의 호스트이름, `http://127.0.0.1:{port}` 오리진에 대한 호출만 통과시킵니다
+* DB: 에이전트가 이 머신에서 만든 키에 builder 가 SSH CA 로 서명한 인증서(기본 24시간, 다시 연결할 때마다 새로)를 씁니다. 배스천 `lily-tunnel` 은 CA 를 `cert-authority,restrict,port-forwarding,permitopen="RDS:5432"` 로 믿습니다
+* DB 계정은 잡의 `databaseEnv` 로 옵니다 (클라우드와 같은 projectId = 앱 이름이라 같은 DB)
+* welcome 에 cloudflare 가 없거나 60초 안에 오지 않으면 quick tunnel(`trycloudflare.com`), database 가 없으면 DB 없는 앱만 받습니다
+* 이 머신에 `CLOUDFLARE_API_TOKEN` 등이나 `DB_TUNNEL_*` 가 있으면 그 설정이 우선합니다 (팀 PC 의 `scripts/agent.sh` + `test/burst/*.env`). 버스팅·거점 전환은 지금도 그 설정이 필요합니다
 
 접속 직후 에이전트가 보내는 메시지입니다.
 

@@ -8,6 +8,8 @@ import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobMessages;
 import com.lily.onpremise.job.JobRecord;
 import com.lily.onpremise.pipeline.DatabaseAccess;
+import com.lily.onpremise.platform.PlatformChannel;
+import com.lily.onpremise.platform.PlatformLink;
 import jakarta.annotation.PreDestroy;
 import jakarta.websocket.ContainerProvider;
 import jakarta.websocket.WebSocketContainer;
@@ -19,9 +21,11 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +46,8 @@ public class WebSocketControlSession implements ControlSession {
     private final AgentIdentity identity;
     private final TrafficSwitch traffic;
     private final ObjectProvider<DatabaseAccess> databases;
+    private final PlatformChannel channel;
+    private final ObjectProvider<PlatformLink> platform;
     private final ObjectMapper mapper = new ObjectMapper();
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopping = new AtomicBoolean();
@@ -53,8 +59,12 @@ public class WebSocketControlSession implements ControlSession {
             AgentProperties properties,
             AgentIdentity identity,
             TrafficSwitch traffic,
-            ObjectProvider<DatabaseAccess> databases) {
+            ObjectProvider<DatabaseAccess> databases,
+            PlatformChannel channel,
+            ObjectProvider<PlatformLink> platform) {
         this.jobs = jobs;
+        this.channel = channel;
+        this.platform = platform;
         this.properties = properties;
         this.identity = identity;
         this.traffic = traffic;
@@ -151,20 +161,45 @@ public class WebSocketControlSession implements ControlSession {
     private final class Handler extends TextWebSocketHandler {
 
         @Override
-        public void afterConnectionEstablished(WebSocketSession session) throws Exception {
+        public void afterConnectionEstablished(WebSocketSession raw) throws Exception {
+            // 잡 상태 보고와 Cloudflare 중계 요청이 서로 다른 스레드에서 같은 소켓에 쓴다
+            WebSocketSession session = new ConcurrentWebSocketSessionDecorator(raw, 10_000, 2 * 1024 * 1024);
             socket.set(session);
+            channel.attach(text -> {
+                try {
+                    session.sendMessage(new TextMessage(text));
+                } catch (IOException e) {
+                    throw new IllegalStateException("컨트롤 플레인으로 보내지 못했습니다: " + e.getMessage(), e);
+                }
+            });
             // database: DB 터널이 설정돼 있어 database 가 있는 잡을 받을 수 있는지. 없으면 컨트롤 플레인이 DB 없이 보낸다
-            session.sendMessage(new TextMessage(mapper.writeValueAsString(Map.of(
-                    "type", "hello",
-                    "agentId", identity.id(),
-                    "publicUrl", traffic.publicUrl() == null ? "" : traffic.publicUrl(),
-                    "version", "0.1.0",
-                    "database", databases.getObject() != DatabaseAccess.NONE))));
+            Map<String, Object> hello = new LinkedHashMap<>();
+            hello.put("type", "hello");
+            hello.put("agentId", identity.id());
+            hello.put("publicUrl", traffic.publicUrl() == null ? "" : traffic.publicUrl());
+            hello.put("version", "0.1.0");
+            hello.put("database", databases.getObject().ready());
+            hello.putAll(platform.getObject().hello());
+            session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
         }
 
         @Override
         protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+            try {
+                com.fasterxml.jackson.databind.JsonNode node = mapper.readTree(message.getPayload());
+                String type = node.path("type").asText();
+                if ("welcome".equals(type)) {
+                    platform.getObject().welcome(node);
+                    return;
+                }
+                if (node.has("rid") && channel.complete(node)) {
+                    return;
+                }
+            } catch (IOException | RuntimeException e) {
+                log.warn("rejected message: {}", e.getMessage());
+                return;
+            }
             try {
                 JobMessages.Inbound inbound = JobMessages.read(message.getPayload());
                 if (inbound.homeApp() != null) {
@@ -185,7 +220,12 @@ public class WebSocketControlSession implements ControlSession {
 
         @Override
         public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-            socket.compareAndSet(session, null);
+            WebSocketSession current = socket.get();
+            if (current instanceof ConcurrentWebSocketSessionDecorator decorated
+                    && decorated.getDelegate() == session) {
+                socket.compareAndSet(current, null);
+            }
+            channel.attach(null);
             CountDownLatch latch = closed.get();
             if (latch != null) {
                 latch.countDown();

@@ -26,7 +26,9 @@ public record DeployJob(
         Map<String, String> env,
         String database,
         String canaryPath,
-        Map<String, String> migrations) {
+        Map<String, String> migrations,
+        /** 컨트롤 플레인이 터널 주소 기준으로 만든 DB 접속 환경변수 (플랫폼 DB 터널일 때) */
+        Map<String, String> databaseEnv) {
 
     /** DB 없이 배포 */
     public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
@@ -38,6 +40,14 @@ public record DeployJob(
     public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
                      String healthPath, String rootDir, String dockerfile, Map<String, String> env, String database) {
         this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database, null, null);
+    }
+
+    /** 컨트롤 플레인이 DB 접속 정보를 싣지 않은 잡 */
+    public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
+                     String healthPath, String rootDir, String dockerfile, Map<String, String> env, String database,
+                     String canaryPath, Map<String, String> migrations) {
+        this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database,
+                canaryPath, migrations, null);
     }
 
     public DeployJob normalize() {
@@ -109,7 +119,8 @@ public record DeployJob(
                 cleanEnv(env),
                 engine,
                 canary,
-                cleanMigrations(migrations));
+                cleanMigrations(migrations),
+                cleanEnv(databaseEnv));
     }
 
     private static URI parseRepo(String repo) {

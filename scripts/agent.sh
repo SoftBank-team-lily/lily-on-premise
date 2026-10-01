@@ -13,7 +13,8 @@
 #   test/burst/burst.env 와 keys/id_ed25519 가 있으면 클라우드 RDS 를 SSH 터널로 붙인다 (test/burst/README.md)
 #   없으면 DB 가 필요한 앱도 DB 없이 배포된다
 #
-# 필요한 것: Docker (Docker Desktop 이면 Settings > Resources > Network 의 host networking 켜기)
+# 필요한 것: Docker (Docker Desktop 의 host networking 설정은 켜지 않아도 된다)
+# 팀 PC 용이다. 일반 사용자는 lily 화면의 docker run 한 줄을 쓴다 (README "lily 화면(내 PC)에서 배포하기")
 set -euo pipefail
 cd "$(dirname "$0")/../test/burst"
 export MSYS_NO_PATHCONV=1

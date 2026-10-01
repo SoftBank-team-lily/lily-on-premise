@@ -18,6 +18,9 @@ import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
 import com.lily.onpremise.pipeline.DatabaseAccess;
 import com.lily.onpremise.pipeline.OnPremPipeline;
+import com.lily.onpremise.platform.PlatformChannel;
+import com.lily.onpremise.platform.PlatformDatabase;
+import com.lily.onpremise.platform.RelayCloudflareClient;
 import com.lily.onpremise.schema.FlywaySchemaApply;
 import com.lily.onpremise.schema.SchemaApply;
 import com.lily.onpremise.runtime.CliContainerRuntime;
@@ -77,8 +80,12 @@ public class RuntimeConfiguration {
                 Duration.ofSeconds(2));
     }
 
+    /** 플랫폼 연결이면 Cloudflare 호출을 컨트롤 플레인이 대신 한다. 이 머신에는 API 토큰이 없다 */
     @Bean
-    CloudflareHostnameProvisioner hostnames(AgentProperties properties) {
+    CloudflareHostnameProvisioner hostnames(AgentProperties properties, PlatformChannel channel) {
+        if (properties.platformExposure()) {
+            return new CloudflareHostnameProvisioner(new RelayCloudflareClient(channel), properties.cloudflare());
+        }
         String apiToken = properties.cloudflare() == null ? "" : properties.cloudflare().apiToken();
         return new CloudflareHostnameProvisioner(new HttpCloudflareClient(apiToken), properties.cloudflare());
     }
@@ -95,27 +102,38 @@ public class RuntimeConfiguration {
     @Bean
     PublicAddress publicAddress(
             AgentProperties properties, LocalExposure exposure, CloudflareHostnameProvisioner hostnames) {
-        if (properties.cloudflare() == null || !properties.cloudflare().apiConfigured()) {
+        boolean api = properties.cloudflare() != null && properties.cloudflare().apiConfigured();
+        if (!api && !properties.platformExposure()) {
             return app -> exposure.publicUrl();
         }
         return app -> {
+            // 플랫폼 존을 받지 못해 quick tunnel 로 열렸으면 그 주소를 쓴다
+            if (!api && !hostnames.configured()) {
+                return exposure.publicUrl();
+            }
             String url = hostnames.ensureHostname(app, exposure.listenPort());
             exposure.publish(url);
             return url;
         };
     }
 
-    /** 배포 요청에 database 가 있을 때 클라우드 RDS 를 SSH 터널로 붙인다. 설정이 없으면 DB 배포를 거절한다 */
+    /**
+     * 배포 요청에 database 가 있을 때 클라우드 RDS 를 SSH 터널로 붙인다.
+     * 이 머신에 터널 설정이 있으면 그것을, 없고 컨트롤 플레인에 붙으면 플랫폼이 주는 인증서를 쓴다. 둘 다 아니면 DB 배포를 거절한다
+     */
     @Bean
     DatabaseAccess databaseAccess(AgentProperties properties, Commands commands, ObjectMapper json) {
         AgentProperties.Database db = properties.database();
-        if (db == null || !db.configured() || properties.burst().builderUrl().isBlank()) {
-            return DatabaseAccess.NONE;
-        }
         String dir = properties.workspace();
         Path workDir = dir == null || dir.isBlank()
                 ? Path.of(System.getProperty("java.io.tmpdir"), "lily-onprem")
                 : Path.of(dir);
+        if (properties.platformDatabase()) {
+            return new PlatformDatabase(commands, db, workDir);
+        }
+        if (db == null || !db.configured() || properties.burst().builderUrl().isBlank()) {
+            return DatabaseAccess.NONE;
+        }
         return new CloudDatabase(new DatabaseTunnel(db, commands, workDir), new BurstClient(properties.burst(), json));
     }
 

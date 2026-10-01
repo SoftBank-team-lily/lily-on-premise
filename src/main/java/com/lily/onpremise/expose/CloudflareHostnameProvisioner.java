@@ -19,9 +19,10 @@ public final class CloudflareHostnameProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final CloudflareClient client;
-    private final String accountId;
-    private final String zoneId;
-    private final String zoneName;
+    // 플랫폼 연결이면 컨트롤 플레인의 welcome 을 받은 뒤에 정해진다
+    private volatile String accountId;
+    private volatile String zoneId;
+    private volatile String zoneName;
     private volatile String tunnelId = "";
     /** 거점이 클라우드이거나 그쪽으로 옮기는 중이면 배포가 CNAME 을 터널로 되돌리지 않는다 */
     private volatile boolean holdDns;
@@ -31,6 +32,19 @@ public final class CloudflareHostnameProvisioner {
         this.accountId = cloudflare == null ? "" : cloudflare.accountId();
         this.zoneId = cloudflare == null ? "" : cloudflare.zoneId();
         this.zoneName = cloudflare == null ? "" : cloudflare.zoneNameNormalized();
+    }
+
+    /** 컨트롤 플레인이 알려 준 계정·존. 호출은 생성자의 client(컨트롤 플레인 중계)가 한다 */
+    public void configure(String accountId, String zoneId, String zoneName) {
+        this.accountId = accountId == null ? "" : accountId;
+        this.zoneId = zoneId == null ? "" : zoneId;
+        this.zoneName = new AgentProperties.Cloudflare(false, "", "", "", "", zoneName).zoneNameNormalized();
+        this.tunnelId = "";
+    }
+
+    /** 터널이 열려 앱마다 호스트이름을 붙일 수 있다 */
+    public boolean configured() {
+        return !tunnelId.isBlank() && !zoneName.isBlank();
     }
 
     /** 에이전트 터널을 만들거나 찾고, cloudflared 에 넣을 토큰을 돌려준다. */
