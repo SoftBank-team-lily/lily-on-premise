@@ -465,16 +465,33 @@ CLOUDFLARE_ENABLED=true java -jar app.jar
 CLOUDFLARE_ENABLED=true CLOUDFLARE_TUNNEL_TOKEN=... PUBLIC_URL=https://blog.example.com java -jar app.jar
 ```
 
-컨트롤 플레인에 연결할 때는 소켓 주소를 지정합니다.
+컨트롤 플레인에 연결할 때는 소켓 주소를 지정합니다. lily 플랫폼의 컨트롤 플레인은 lily-builder 입니다 (`/api/agents/connect`).
 
 ```text
-CONTROL_PLANE_URL=wss://control.example/agents java -jar app.jar
+CONTROL_PLANE_URL=wss://builder.apps.lilycloud.kr/api/agents/connect?token=... java -jar app.jar
 ```
+
+### lily 화면(내 PC)에서 배포하기
+
+lily-frontend `/account` 에서 배포 위치를 "내 PC" 로 고르고 "연결 토큰 받기" 를 누르면 실행 명령이 나옵니다.
+
+```text
+git clone https://github.com/SoftBank-team-lily/lily-on-premise && cd lily-on-premise
+LILY_AGENT_TOKEN=<화면의 토큰> ./scripts/agent.sh
+```
+
+* `scripts/agent.sh` 는 `test/burst/agent.Dockerfile` 로 에이전트 이미지를 만들고 `--network host` 로 띄웁니다. 필요한 것은 Docker 뿐입니다
+* 화면에 "연결됨" 이 보이면 레포를 등록합니다. 상태는 목록에 "내 PC · 배포 중 → 배포 완료" 로 바뀌고 "앱 열기" 가 생깁니다
+* 공개 주소: `test/burst/cloudflare.env` 가 있으면 플랫폼 존 주소, 없으면 quick tunnel(`trycloudflare.com`)
+* DB: `test/burst/burst.env` 와 `keys/` 가 있으면 DB 터널을 엽니다. 없는데 레포가 DB 드라이버를 쓰면 lily-builder 가 잡을 보내지 않고 이유와 함께 실패시킵니다
+* hello 의 `database` 는 DB 터널이 설정됐는지입니다 (컨트롤 플레인이 DB 가 필요한 잡을 보낼지 정합니다)
+* 에이전트 하나는 앱 하나만 띄웁니다. 화면에서도 내 PC 프로젝트는 계정당 하나입니다
+* 로그 `./scripts/agent.sh logs`, 중지 `./scripts/agent.sh stop`
 
 접속 직후 에이전트가 보내는 메시지입니다.
 
 ```json
-{"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0"}
+{"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false}
 ```
 
 컨트롤 플레인이 같은 소켓으로 보내는 잡입니다.
