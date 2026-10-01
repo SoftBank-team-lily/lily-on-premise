@@ -7,6 +7,7 @@ import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobMessages;
 import com.lily.onpremise.job.JobRecord;
+import com.lily.onpremise.pipeline.DatabaseAccess;
 import jakarta.annotation.PreDestroy;
 import jakarta.websocket.ContainerProvider;
 import jakarta.websocket.WebSocketContainer;
@@ -40,6 +41,7 @@ public class WebSocketControlSession implements ControlSession {
     private final AgentProperties properties;
     private final AgentIdentity identity;
     private final TrafficSwitch traffic;
+    private final ObjectProvider<DatabaseAccess> databases;
     private final ObjectMapper mapper = new ObjectMapper();
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopping = new AtomicBoolean();
@@ -50,11 +52,13 @@ public class WebSocketControlSession implements ControlSession {
             ObjectProvider<JobSink> jobs,
             AgentProperties properties,
             AgentIdentity identity,
-            TrafficSwitch traffic) {
+            TrafficSwitch traffic,
+            ObjectProvider<DatabaseAccess> databases) {
         this.jobs = jobs;
         this.properties = properties;
         this.identity = identity;
         this.traffic = traffic;
+        this.databases = databases;
     }
 
     @Override
@@ -149,11 +153,13 @@ public class WebSocketControlSession implements ControlSession {
         @Override
         public void afterConnectionEstablished(WebSocketSession session) throws Exception {
             socket.set(session);
+            // database: DB 터널이 설정돼 있어 database 가 있는 잡을 받을 수 있는지. 없으면 컨트롤 플레인이 DB 없이 보낸다
             session.sendMessage(new TextMessage(mapper.writeValueAsString(Map.of(
                     "type", "hello",
                     "agentId", identity.id(),
                     "publicUrl", traffic.publicUrl() == null ? "" : traffic.publicUrl(),
-                    "version", "0.1.0"))));
+                    "version", "0.1.0",
+                    "database", databases.getObject() != DatabaseAccess.NONE))));
             log.info("control plane connected: agent={}", identity.id());
         }
 
