@@ -1,5 +1,7 @@
 package com.lily.onpremise.burst;
 
+import com.lily.onpremise.database.DatabaseModes;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lily.onpremise.config.AgentProperties;
 import com.lily.onpremise.expose.LocalExposure;
@@ -17,6 +19,8 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -126,6 +130,14 @@ public class CloudBurst implements BurstGate {
         event("park: home is cloud");
     }
 
+    private volatile DatabaseModes onPremDatabase;
+
+    /** DB 위치가 local·external 인 앱의 클라우드 접속 정보를 여기서 받는다 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void onPremDatabase(DatabaseModes databases) {
+        this.onPremDatabase = databases;
+    }
+
     /** 온프레미스 배포가 성공하면 클라우드에 같은 앱을 대기 배포한다 */
     public void onDeployed(DeployJob job) {
         if (!settings.enabled()) {
@@ -154,7 +166,20 @@ public class CloudBurst implements BurstGate {
     private void prepareStandby(DeployJob job, String publicHost) {
         try {
             String database = job.database() != null ? job.database() : settings.database();
-            String id = client.standby(job, publicHost, database);
+            Map<String, String> databaseEnv = null;
+            if (job.database() != null && !"cloud".equals(job.databaseModeOrDefault())) {
+                // 이 PC 의 DB 를 쓴다. 클라우드 Pod 는 역방향 터널로 같은 DB 에 붙는다
+                Optional<Map<String, String>> env = onPremDatabase == null
+                        ? Optional.empty() : onPremDatabase.cloudEnv(job.appName());
+                if (env.isEmpty()) {
+                    phase = Phase.OFF;
+                    event("skip: 클라우드에서 이 PC 의 DB 에 닿을 역방향 터널이 없습니다 (플랫폼 연결 필요)");
+                    return;
+                }
+                database = null;
+                databaseEnv = env.get();
+            }
+            String id = client.standby(job, publicHost, database, databaseEnv);
             event("standby: cloud build " + id + " host=" + publicHost);
             long deadline = System.currentTimeMillis() + 15 * 60_000L;
             while (System.currentTimeMillis() < deadline) {

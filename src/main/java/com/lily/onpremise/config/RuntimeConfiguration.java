@@ -7,6 +7,10 @@ import com.lily.onpremise.burst.CloudBurst;
 import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.burst.CloudDatabase;
 import com.lily.onpremise.burst.DatabaseTunnel;
+import com.lily.onpremise.database.DatabaseModes;
+import com.lily.onpremise.database.ExternalDatabase;
+import com.lily.onpremise.database.LocalDatabase;
+import com.lily.onpremise.database.ReverseTunnel;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lily.onpremise.expose.CandidateJudge;
 import com.lily.onpremise.expose.CloudflareHostnameProvisioner;
@@ -121,13 +125,31 @@ public class RuntimeConfiguration {
      * 배포 요청에 database 가 있을 때 클라우드 RDS 를 SSH 터널로 붙인다.
      * 이 머신에 터널 설정이 있으면 그것을, 없고 컨트롤 플레인에 붙으면 플랫폼이 주는 인증서를 쓴다. 둘 다 아니면 DB 배포를 거절한다
      */
+    @Bean(destroyMethod = "close")
+    ReverseTunnel reverseTunnel() {
+        return new ReverseTunnel();
+    }
+
+    /**
+     * 잡의 DB 위치에 따라 고른다. local(이 PC 의 DB 컨테이너)·external(사용자 DB 주소)은 언제나 받고,
+     * cloud(RDS)는 아래 터널이 있을 때만 받는다.
+     */
     @Bean
-    DatabaseAccess databaseAccess(AgentProperties properties, Commands commands, ObjectMapper json) {
+    DatabaseModes databaseAccess(AgentProperties properties, Commands commands, ObjectMapper json,
+                                 ReverseTunnel reverse) {
         AgentProperties.Database db = properties.database();
         String dir = properties.workspace();
         Path workDir = dir == null || dir.isBlank()
                 ? Path.of(System.getProperty("java.io.tmpdir"), "lily-onprem")
                 : Path.of(dir);
+        String bindHost = db == null ? "172.17.0.1" : db.bindHost();
+        return new DatabaseModes(cloudDatabase(properties, commands, json, workDir),
+                new LocalDatabase(commands, workDir, bindHost), new ExternalDatabase(), reverse);
+    }
+
+    private static DatabaseAccess cloudDatabase(AgentProperties properties, Commands commands, ObjectMapper json,
+                                                Path workDir) {
+        AgentProperties.Database db = properties.database();
         if (properties.platformDatabase()) {
             return new PlatformDatabase(commands, db, workDir);
         }

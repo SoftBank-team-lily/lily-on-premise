@@ -68,6 +68,16 @@ public final class PlatformDatabase implements DatabaseAccess {
         }
     }
 
+    /** 인증서({@code platform_key-cert.pub})가 옆에 있는 개인키. 역방향 터널도 같은 키로 연다 */
+    public Path key() {
+        return key;
+    }
+
+    /** DatabaseTunnel 과 같은 known_hosts */
+    public Path knownHosts() {
+        return key.getParent().resolve("known_hosts");
+    }
+
     public String bindHost() {
         return defaults.bindHost();
     }

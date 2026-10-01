@@ -172,10 +172,13 @@ public final class OnPremPipeline {
             env.putAll(job.env());
         }
         if (job.database() != null) {
-            // 클라우드와 같은 DB. 접속 주소는 온프레미스에서 RDS 로 가는 터널
+            // DB 위치: cloud 는 RDS 터널, local 은 이 PC 의 DB 컨테이너, external 은 사용자가 준 주소
+            stage(record, publish, JobRecord.Status.STARTING,
+                    "database: " + job.database() + " (" + job.databaseModeOrDefault() + ") preparing");
             Map<String, String> db = databases.prepare(job);
             env.putAll(db);
-            stage(record, publish, JobRecord.Status.STARTING, "database: " + job.database() + " env keys=" + db.keySet());
+            stage(record, publish, JobRecord.Status.STARTING, "database: " + job.database()
+                    + " (" + job.databaseModeOrDefault() + ") env keys=" + db.keySet());
             if (job.env() != null) {
                 env.putAll(job.env()); // 사용자가 넣은 값이 이긴다
             }
@@ -189,7 +192,7 @@ public final class OnPremPipeline {
                 throw new IllegalStateException("migrations 가 있는데 database 가 없다");
             }
             stage(record, publish, JobRecord.Status.STARTING, "schema: " + job.migrations().size() + " files");
-            schema.apply(env, job.migrations());
+            schema.apply(databases.agentEnv(job, env), job.migrations());
             schemaApplied = true;
             // 앱이 같은 스크립트를 다시 실행하지 않게 한다. 클라우드 배포와 같은 키다
             env.put("SPRING_FLYWAY_ENABLED", "false");
