@@ -5,6 +5,7 @@ import com.lily.onpremise.AgentIdentity;
 import com.lily.onpremise.burst.CloudBurst;
 import com.lily.onpremise.config.AgentProperties;
 import com.lily.onpremise.cutover.HomeCutover;
+import com.lily.onpremise.runtime.ContainerStats;
 import com.lily.onpremise.expose.UpstreamProxy;
 import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.job.DeployJob;
@@ -60,6 +61,7 @@ public class WebSocketControlSession implements ControlSession {
     private final ObjectProvider<PlatformLink> platform;
     private final ObjectProvider<CloudBurst> burst;
     private final ObjectProvider<HomeCutover> cutover;
+    private final ObjectProvider<ContainerStats> stats;
     private final ObjectMapper mapper = new ObjectMapper();
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopping = new AtomicBoolean();
@@ -75,8 +77,10 @@ public class WebSocketControlSession implements ControlSession {
             PlatformChannel channel,
             ObjectProvider<PlatformLink> platform,
             ObjectProvider<CloudBurst> burst,
-            ObjectProvider<HomeCutover> cutover) {
+            ObjectProvider<HomeCutover> cutover,
+            ObjectProvider<ContainerStats> stats) {
         this.jobs = jobs;
+        this.stats = stats;
         this.burst = burst;
         this.cutover = cutover;
         this.channel = channel;
@@ -197,6 +201,14 @@ public class WebSocketControlSession implements ControlSession {
         state.put("homeStepSince", h.stepSince());
         state.put("homeBuild", h.stepBuild());
         state.put("homeCancellable", h.cancellable());
+        // HOME 자원: 지금 트래픽을 받는 컨테이너의 CPU·메모리와 내 PC 가 처리한 요청의 p95. 모르면 null
+        ContainerStats source = stats.getIfAvailable();
+        ContainerStats.Usage usage = source == null ? null : source.usage().orElse(null);
+        state.put("homeCpuPercent", usage == null ? null : Math.round(usage.cpuPercent() * 10) / 10.0);
+        state.put("homeMemoryMiB", usage == null ? null : Math.round(usage.memoryMiB()));
+        state.put("homeMemoryPercent", usage == null ? null : Math.round(usage.memoryPercent() * 10) / 10.0);
+        long p95 = burst.getObject().proxyLocalP95();
+        state.put("homeP95Ms", p95 < 0 ? null : p95);
         return state;
     }
 

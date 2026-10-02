@@ -297,6 +297,11 @@ public class CloudBurst implements BurstGate {
         Thread.ofVirtual().name("lily-burst-standby").start(() -> prepareStandby(job, publicHost, run));
     }
 
+    /** 내 PC 가 처리한 요청의 최근 5분 p95 (ms). 없으면 -1 */
+    public long proxyLocalP95() {
+        return proxy.localP95Millis();
+    }
+
     public Status status() {
         UpstreamProxy.Pressure pressure = proxy.pressure();
         synchronized (events) {
