@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <pre>
  * 컨트롤 플레인 → {"type":"burst","app":"..","enabled":true,"cloudPercent":30}   버스팅 켜기·끄기와 클라우드 비율
+ * 컨트롤 플레인 → {"type":"home-cancel","app":".."}   진행 중인 거점 전환 취소 (주소를 바꾸기 전까지)
  * 에이전트     → {"type":"burst-state", ...}  {@value #STATE_SECONDS}초마다 버스팅·거점 상태
  * </pre>
  */
@@ -176,6 +177,8 @@ public class WebSocketControlSession implements ControlSession {
         state.put("enabled", b.enabled());
         state.put("cloudPercent", b.cloudPercent());
         state.put("phase", b.phase().name());
+        state.put("phaseSince", b.phaseSince());
+        state.put("standbyBuild", b.standbyBuild());
         state.put("warm", b.warm());
         state.put("localActive", p.localActive());
         state.put("remoteActive", p.remoteActive());
@@ -188,6 +191,12 @@ public class WebSocketControlSession implements ControlSession {
         state.put("homeEvent", h.events().isEmpty() ? "" : h.events().get(0));
         state.put("databaseMode", h.databaseMode());
         state.put("databaseMovable", h.databaseMovable());
+        // 거점 전환 진행: 단계 순서, 지금 단계와 들어온 시각, 기다리는 클라우드 빌드, 취소할 수 있는지
+        state.put("homeSteps", h.steps());
+        state.put("homeStep", h.step());
+        state.put("homeStepSince", h.stepSince());
+        state.put("homeBuild", h.stepBuild());
+        state.put("homeCancellable", h.cancellable());
         return state;
     }
 
@@ -241,7 +250,7 @@ public class WebSocketControlSession implements ControlSession {
             hello.put("database", databases.getObject().ready());
             hello.putAll(platform.getObject().hello());
             // 이 에이전트가 받는 메시지. 없으면 컨트롤 플레인은 버스팅 설정을 보내지 않는다
-            hello.put("features", java.util.List.of("burst", "home"));
+            hello.put("features", java.util.List.of("burst", "home", "home-cancel"));
             session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
             Thread.ofVirtual().name("lily-burst-state").start(() -> sendState(session));
@@ -257,6 +266,14 @@ public class WebSocketControlSession implements ControlSession {
                     return;
                 }
                 if (node.has("rid") && channel.complete(node)) {
+                    return;
+                }
+                if ("home-cancel".equals(type)) {
+                    try {
+                        cutover.getObject().cancel(node.path("app").asText(""));
+                    } catch (IllegalArgumentException e) {
+                        log.info("home cancel rejected: {}", e.getMessage());
+                    }
                     return;
                 }
                 if ("burst".equals(type)) {

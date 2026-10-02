@@ -76,6 +76,12 @@ public class CloudBurst implements BurstGate {
     private volatile String platformZone = "";
 
     private volatile Phase phase = Phase.OFF;
+    /** 지금 단계에 들어온 시각 (화면이 경과 시간을 보인다) */
+    private volatile long phaseSince = System.currentTimeMillis();
+    /** 진행 중이거나 마지막 대기 배포의 builder 빌드 id */
+    private volatile String standbyBuild = "";
+    /** 거점을 옮기는 중이면 참. 그동안 켜기·끄기를 받지 않는다 */
+    private volatile BooleanSupplier moving = () -> false;
     /** 화면에서 켠 상태. 환경변수 BURST_ENABLED 가 처음 값이다 */
     private volatile boolean enabled;
     private volatile int cloudPercent;
@@ -169,13 +175,18 @@ public class CloudBurst implements BurstGate {
         if (on == enabled) {
             return;
         }
+        if (moving.getAsBoolean()) {
+            // 거점 전환도 대기 배포를 쓴다. 겹치면 늦게 끝난 쪽이 클라우드를 0 으로 내릴 수 있다
+            event("skip: 거점을 옮기는 중이라 버스팅을 " + (on ? "켜지" : "끄지") + " 않아요");
+            return;
+        }
         enabled = on;
         if (!on) {
             generation.incrementAndGet();
             proxy.clearOverflow();
             warm = false;
             Phase was = phase;
-            phase = Phase.OFF;
+            setPhase(Phase.OFF);
             if (was != Phase.OFF && appName != null && client != null && scaleGate.getAsBoolean()) {
                 try {
                     client.scale(appName, 0);
@@ -190,6 +201,23 @@ public class CloudBurst implements BurstGate {
         if (job != null) {
             onDeployed(job);
         }
+    }
+
+    private void setPhase(Phase next) {
+        if (phase != next) {
+            phaseSince = System.currentTimeMillis();
+        }
+        phase = next;
+    }
+
+    @Override
+    public void holdChanges(BooleanSupplier moving) {
+        this.moving = moving == null ? () -> false : moving;
+    }
+
+    @Override
+    public boolean busy() {
+        return phase == Phase.STANDBY;
     }
 
     @Override
@@ -207,7 +235,7 @@ public class CloudBurst implements BurstGate {
     public void park() {
         proxy.clearOverflow();
         warm = false;
-        phase = Phase.OFF;
+        setPhase(Phase.OFF);
         event("park: home is cloud");
     }
 
@@ -218,7 +246,7 @@ public class CloudBurst implements BurstGate {
             return;
         }
         scalingSince = System.currentTimeMillis();
-        phase = Phase.WARMING;
+        setPhase(Phase.WARMING);
         event("resume: home is onprem");
     }
 
@@ -255,7 +283,7 @@ public class CloudBurst implements BurstGate {
         this.warm = false;
         this.appName = job.appName();
         this.host = publicHost;
-        this.phase = Phase.STANDBY;
+        setPhase(Phase.STANDBY);
         // 대기 배포는 길게는 15분 걸린다. 그동안 틱과 설정 변경이 막히지 않게 스케줄러 밖에서 기다린다
         Thread.ofVirtual().name("lily-burst-standby").start(() -> prepareStandby(job, publicHost, run));
     }
@@ -263,7 +291,8 @@ public class CloudBurst implements BurstGate {
     public Status status() {
         UpstreamProxy.Pressure pressure = proxy.pressure();
         synchronized (events) {
-            return new Status(enabled, available(), cloudPercent, phase, appName, host, warm, pressure,
+            return new Status(enabled, available(), cloudPercent, phase, phaseSince, standbyBuild, appName, host, warm,
+                    pressure,
                     List.copyOf(events));
         }
     }
@@ -292,6 +321,7 @@ public class CloudBurst implements BurstGate {
     private void prepareStandby(DeployJob job, String publicHost, int run) {
         try {
             String id = standby(job, publicHost);
+            standbyBuild = id;
             event("standby: cloud build " + id + " host=" + publicHost);
             long deadline = System.currentTimeMillis() + 15 * 60_000L;
             while (System.currentTimeMillis() < deadline) {
@@ -328,7 +358,7 @@ public class CloudBurst implements BurstGate {
 
     private void off(int run, String line) {
         if (run == generation.get()) {
-            phase = Phase.OFF;
+            setPhase(Phase.OFF);
         }
         event(line);
     }
@@ -337,17 +367,17 @@ public class CloudBurst implements BurstGate {
     void standbyReady(long now) {
         if (!scaleGate.getAsBoolean()) {
             // 거점이 클라우드다. 공개 주소가 쓰는 레플리카를 대기 수로 내리지 않는다
-            phase = Phase.OFF;
+            setPhase(Phase.OFF);
             event("standby ready: home is cloud, replicas unchanged");
             return;
         }
         if (settings.warmReplicas() < 1) {
-            phase = Phase.IDLE;
+            setPhase(Phase.IDLE);
             event("standby ready: cloud replicas 0");
             return;
         }
         client.scale(appName, settings.warmReplicas());
-        phase = Phase.WARMING;
+        setPhase(Phase.WARMING);
         scalingSince = now;
         event("standby ready: warming cloud replicas " + settings.warmReplicas());
     }
@@ -373,12 +403,12 @@ public class CloudBurst implements BurstGate {
                 if (cloudReachable()) {
                     proxy.overflowTo(ingress());
                     warm = true;
-                    phase = Phase.IDLE;
+                    setPhase(Phase.IDLE);
                     event("warm: cloud ready, overflow on" + (cloudPercent > 0 ? ", share " + cloudPercent + "%" : ""));
                 } else if (now - scalingSince > SCALE_TIMEOUT_MILLIS) {
                     // 대기 Pod 없이도 동작은 한다. 넘길 때 띄우는 방식으로 돌아간다
                     client.scale(appName, 0);
-                    phase = Phase.IDLE;
+                    setPhase(Phase.IDLE);
                     event("warm timeout: cloud back to 0");
                 }
             }
@@ -398,10 +428,10 @@ public class CloudBurst implements BurstGate {
                     saturatedSince = 0;
                     if (warm) {
                         // 넘김은 대기 Pod 로 이미 켜져 있다. 늘어나는 Pod 는 Ready 되는 대로 Ingress 가 나눠 준다
-                        phase = Phase.OVERFLOWING;
+                        setPhase(Phase.OVERFLOWING);
                         quietSince = 0;
                     } else {
-                        phase = Phase.SCALING;
+                        setPhase(Phase.SCALING);
                         scalingSince = now;
                     }
                     event("scale up: local " + p.localActive() + "/" + p.localLimit()
@@ -413,12 +443,12 @@ public class CloudBurst implements BurstGate {
                 // Deployment 가 Ready 여도 Ingress 엔드포인트 반영은 늦다. 공개 호스트로 Pod 까지 닿는지 확인하고 넘긴다
                 if (app.readyReplicas() >= 1 && reachesPod.test(ingress(), host)) {
                     proxy.overflowTo(ingress());
-                    phase = Phase.OVERFLOWING;
+                    setPhase(Phase.OVERFLOWING);
                     quietSince = 0;
                     event("overflowing: cloud ready " + app.readyReplicas() + "/" + app.replicas());
                 } else if (now - scalingSince > SCALE_TIMEOUT_MILLIS) {
                     client.scale(appName, 0);
-                    phase = Phase.IDLE;
+                    setPhase(Phase.IDLE);
                     event("scale up timeout: cloud back to 0");
                 }
             }
@@ -440,7 +470,7 @@ public class CloudBurst implements BurstGate {
                         proxy.clearOverflow();
                         client.scale(appName, 0);
                     }
-                    phase = Phase.IDLE;
+                    setPhase(Phase.IDLE);
                     event("scale down: quiet " + settings.cooldownSeconds() + "s, cloud replicas "
                             + (warm ? settings.warmReplicas() : 0) + ", overflowed total " + p.overflowedTotal());
                 }
@@ -487,7 +517,8 @@ public class CloudBurst implements BurstGate {
      * @param available    builder 와 클라우드 Ingress 가 있어 켤 수 있다
      * @param cloudPercent 대기 Pod 가 닿은 뒤 클라우드로 보내는 요청 비율
      */
-    public record Status(boolean enabled, boolean available, int cloudPercent, Phase phase, String appName,
+    public record Status(boolean enabled, boolean available, int cloudPercent, Phase phase, long phaseSince,
+                         String standbyBuild, String appName,
                          String publicHost, boolean warm, UpstreamProxy.Pressure pressure, List<String> events) {
     }
 }

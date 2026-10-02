@@ -77,6 +77,18 @@ public final class HomeCutover implements DeployedApp {
     private final Deque<String> events = new ArrayDeque<>();
 
     private volatile Phase phase = Phase.ONPREM;
+    /**
+     * 진행 표시. steps 는 이번 전환의 단계 순서, step 은 지금 단계, stepSince 는 그 단계에 들어온 시각, stepBuild 는
+     * 그 단계가 기다리는 builder 빌드 id. 단계 이름: STANDBY(클라우드 대기 배포) COPY(DB 복사) PAUSE(쓰기 멈춤)
+     * DEPLOY(내 PC 배포) SCALE(클라우드 Pod 준비) DNS(주소 전환) VERIFY(공개 확인)
+     */
+    private volatile List<String> steps = List.of();
+    private volatile String step = "";
+    private volatile long stepSince;
+    private volatile String stepBuild = "";
+    /** 화면이 취소를 눌렀다. 주소를 바꾸기 전 단계에서만 받는다 */
+    private volatile boolean cancelRequested;
+    private volatile boolean cancellable;
     private volatile DeployJob job;
     private volatile boolean repoDockerfile;
     private volatile String cloudJobId;
@@ -190,6 +202,7 @@ public final class HomeCutover implements DeployedApp {
             this.later = later;
         }
         if (burst != null) {
+            burst.holdChanges(this::moving);
             burst.allowScale(this::onPrem);
             burst.whenStandby(this::noteCloud);
         }
@@ -296,7 +309,7 @@ public final class HomeCutover implements DeployedApp {
         DeployJob current = job;
         String mode = current == null || current.database() == null ? "" : current.databaseModeOrDefault();
         return new Status(phase.name(), appName, hostOf(appName), cnameContent, already, copyEvents(), mode,
-                databaseMovable(current));
+                databaseMovable(current), steps, step, stepSince, stepBuild, cancellable && !cancelRequested);
     }
 
     /** 이 앱 DB 를 거점과 같이 옮길 수 있다 (postgres, 내 PC 또는 RDS) */
@@ -327,15 +340,65 @@ public final class HomeCutover implements DeployedApp {
         if ((want == Place.CLOUD && phase == Phase.CLOUD) || (want == Place.ONPREM && phase == Phase.ONPREM)) {
             return status(true);
         }
+        if (burst != null && burst.busy()) {
+            // 둘 다 클라우드 대기 배포를 한다. 늦게 끝난 버스팅 대기 배포가 옮긴 클라우드를 0 으로 내릴 수 있다
+            throw new IllegalArgumentException("버스팅 대기 배포가 진행 중이에요. 끝나거나 버스팅을 끈 뒤 옮겨 주세요");
+        }
         reject(app, want);
         if (migrateDatabase) {
             rejectMigrate(want);
         }
         pending = want;
         pendingMigrate = migrateDatabase;
+        cancelRequested = false;
+        cancellable = true;
+        steps = List.of();
+        step = "";
+        stepBuild = "";
         phase(want == Place.CLOUD ? Phase.MOVING_TO_CLOUD : Phase.MOVING_TO_ONPREM);
         event("move: " + want.name().toLowerCase() + (migrateDatabase ? " with database" : ""));
         return status();
+    }
+
+    /**
+     * 진행 중인 전환을 멈춘다. 주소를 바꾸기 전이면 다음 확인 지점에서 출발 거점으로 되돌린다.
+     * @throws IllegalArgumentException 옮기는 중이 아니거나, 이미 주소를 바꿔 되돌릴 수 없다
+     */
+    public synchronized Status cancel(String app) {
+        if (!moving()) {
+            throw new IllegalArgumentException("옮기는 중이 아니에요");
+        }
+        if (app != null && appName != null && !app.equals(appName)) {
+            throw new IllegalArgumentException("앱이 다릅니다");
+        }
+        if (!cancellable) {
+            throw new IllegalArgumentException("공개 주소를 이미 바꿔서 취소할 수 없어요. 끝난 뒤 반대로 옮겨 주세요");
+        }
+        cancelRequested = true;
+        event("cancel: 다음 단계 전에 멈춰요");
+        return status();
+    }
+
+    public boolean moving() {
+        return phase == Phase.MOVING_TO_CLOUD || phase == Phase.MOVING_TO_ONPREM;
+    }
+
+    /** 단계를 넘긴다. 취소를 받았으면 여기서 멈춘다 (주소를 바꾸기 전 단계만) */
+    private void step(String next) {
+        checkCancel();
+        if ("DNS".equals(next)) {
+            cancellable = false;
+        }
+        step = next;
+        stepSince = clock.getAsLong();
+        stepBuild = "";
+        event("step: " + next);
+    }
+
+    private void checkCancel() {
+        if (cancelRequested && cancellable) {
+            throw new IllegalStateException("취소했어요");
+        }
     }
 
     public void perform() {
@@ -418,7 +481,13 @@ public final class HomeCutover implements DeployedApp {
         keepMoving = false;
         boolean paused = false;
         boolean redeployed = false;
+        boolean needStandby = migrate || known == null || !known.equals(current.id());
+        steps = migrate ? List.of("STANDBY", "COPY", "SCALE", "DNS", "VERIFY")
+                : needStandby ? List.of("STANDBY", "SCALE", "DNS", "VERIFY") : List.of("SCALE", "DNS", "VERIFY");
         try {
+            if (needStandby) {
+                step("STANDBY");
+            }
             if (migrate) {
                 // 클라우드 대기 Pod 가 RDS 를 보게 바꾸는 동안 버스팅이 그쪽으로 넘기지 않게 한다
                 if (burst != null) {
@@ -429,6 +498,7 @@ public final class HomeCutover implements DeployedApp {
                 redeployed = true;
                 waitStandby(target);
                 cloudJobId = target.id();
+                step("COPY");
                 event("database: 쓰기 멈춤");
                 databaseMove.pause(true);
                 paused = true;
@@ -438,13 +508,27 @@ public final class HomeCutover implements DeployedApp {
                 waitStandby(current);
                 cloudJobId = current.id();
             }
+            step("SCALE");
             client.scale(app, Math.max(burstSettings.replicas(), warm));
-            if (!await(this::cloudReady, SCALE_TIMEOUT_MILLIS)) {
+            boolean ready;
+            try {
+                ready = await(this::cloudReady, SCALE_TIMEOUT_MILLIS);
+            } catch (IllegalStateException cancelled) {
+                client.scale(app, warm);
+                throw cancelled;
+            }
+            if (!ready) {
                 client.scale(app, warm);
                 phase(Phase.ONPREM);
                 throw new IllegalStateException("클라우드 Pod 에 닿지 못했습니다");
             }
             String host = dns.hostname(app);
+            try {
+                step("DNS");
+            } catch (IllegalStateException cancelled) {
+                client.scale(app, warm);
+                throw cancelled;
+            }
             try {
                 moveDns(host, cloudOrigin);
             } catch (RuntimeException e) {
@@ -452,6 +536,7 @@ public final class HomeCutover implements DeployedApp {
                 phase(Phase.ONPREM);
                 throw new IllegalStateException("CNAME 변경에 실패했습니다: " + e.getMessage(), e);
             }
+            step("VERIFY");
             String url = "https://" + host + OnPremPipeline.probePath(current.canaryPath(), current.healthPath());
             if (!publicOk.test(url)) {
                 try {
@@ -505,9 +590,11 @@ public final class HomeCutover implements DeployedApp {
         String app = current.appName();
         keepMoving = false;
         boolean cloudStopped = false;
+        steps = migrate ? List.of("PAUSE", "DEPLOY", "DNS", "VERIFY") : List.of("DEPLOY", "DNS", "VERIFY");
         try {
             DeployJob target = current;
             if (migrate) {
+                step("PAUSE");
                 event("database: RDS 연결");
                 Map<String, String> rds = databaseMove.rdsEnv(current);
                 // 클라우드를 0 으로 내려 RDS 쓰기를 멈춘다 (Ingress 가 503). 로컬 배포가 RDS 를 내 PC DB 로 복사한다
@@ -517,19 +604,27 @@ public final class HomeCutover implements DeployedApp {
                 event("database: RDS → 내 PC 복사");
                 target = current.withDatabase("local", rds, true);
             }
+            step("DEPLOY");
             if (!localDeploy.deploy(target)) {
                 throw new IllegalStateException("로컬 배포에 실패했습니다");
+            }
+            if (cancelRequested) {
+                // 배포는 중간에 끊지 않는다. 끝난 뒤 방금 띄운 내 PC 앱을 멈추고 클라우드에 남는다
+                stopIf(Phase.MOVING_TO_ONPREM, liveContainer.get());
+                checkCancel();
             }
             if (databaseMove != null) {
                 databaseMove.pause(false);
             }
             String host = dns.hostname(app);
+            step("DNS");
             try {
                 moveDns(host, dns.tunnelTarget());
             } catch (RuntimeException e) {
                 stopIf(Phase.MOVING_TO_ONPREM, liveContainer.get());
                 throw new IllegalStateException("CNAME 변경에 실패했습니다: " + e.getMessage(), e);
             }
+            step("VERIFY");
             String url = "https://" + host + OnPremPipeline.probePath(current.canaryPath(), current.healthPath());
             if (!publicOk.test(url)) {
                 try {
@@ -610,6 +705,7 @@ public final class HomeCutover implements DeployedApp {
         String host = dns.hostname(current.appName());
         // DB 위치가 이 PC 면 역방향 터널 접속 정보로 보내야 해서 버스팅과 같은 길로 보낸다
         String id = burst != null ? burst.standby(current, host) : client.standby(current, host, current.database());
+        stepBuild = id;
         if (!await(() -> standbyDone(id), STANDBY_TIMEOUT_MILLIS)) {
             throw new IllegalStateException("클라우드 대기 배포가 끝나지 않았습니다");
         }
@@ -633,6 +729,7 @@ public final class HomeCutover implements DeployedApp {
     private boolean await(BooleanSupplier ok, long budget) {
         long start = clock.getAsLong();
         while (!ok.getAsBoolean()) {
+            checkCancel();
             if (clock.getAsLong() - start > budget) {
                 return false;
             }
@@ -659,6 +756,12 @@ public final class HomeCutover implements DeployedApp {
 
     private synchronized void phase(Phase next) {
         this.phase = next;
+        if (next != Phase.MOVING_TO_CLOUD && next != Phase.MOVING_TO_ONPREM) {
+            step = "";
+            stepBuild = "";
+            cancellable = false;
+            cancelRequested = false;
+        }
         dns.holdDns(next == Phase.CLOUD || next == Phase.MOVING_TO_ONPREM);
         if (next == Phase.CLOUD && burst != null) {
             burst.park();
@@ -781,7 +884,15 @@ public final class HomeCutover implements DeployedApp {
      * @param databaseMode    지금 앱 DB 위치 (local, cloud, external). DB 가 없으면 ""
      * @param databaseMovable 거점 전환과 같이 DB 를 옮길 수 있다
      */
+    /**
+     * @param steps       이번 전환의 단계 순서 (옮기는 중이 아니면 마지막 전환의 것)
+     * @param step        지금 단계. 옮기는 중이 아니면 빈 문자열
+     * @param stepSince   지금 단계에 들어온 시각 (epoch ms)
+     * @param stepBuild   지금 단계가 기다리는 builder 빌드 id (클라우드 대기 배포)
+     * @param cancellable 지금 취소하면 출발 거점으로 되돌린다 (주소를 바꾸기 전)
+     */
     public record Status(String phase, String appName, String publicHost, String cname, boolean already,
-                         List<String> events, String databaseMode, boolean databaseMovable) {
+                         List<String> events, String databaseMode, boolean databaseMovable,
+                         List<String> steps, String step, long stepSince, String stepBuild, boolean cancellable) {
     }
 }
