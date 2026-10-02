@@ -100,6 +100,11 @@ public class CloudBurst implements BurstGate {
     /** 거점이 온프레미스가 아니면 레플리카를 움직이지 않는다 */
     private volatile BooleanSupplier scaleGate = () -> true;
     private volatile Consumer<DeployJob> standbyListener;
+    /**
+     * 에이전트가 다시 떠서 슬롯을 다시 붙인 앱 ({@link #recover}). 버스팅이 켜져 있으면 다음 틱에 클라우드 대기 Pod 를 찾아
+     * 넘김을 다시 켠다. 플랫폼 연결이면 builder 중계가 붙을 때까지 기다린다
+     */
+    private volatile String pendingRecover;
 
     @Autowired
     public CloudBurst(AgentProperties properties, LocalExposure exposure, ObjectMapper json) {
@@ -187,6 +192,7 @@ public class CloudBurst implements BurstGate {
         }
         enabled = on;
         if (!on) {
+            pendingRecover = null;
             generation.incrementAndGet();
             proxy.clearOverflow();
             warm = false;
@@ -205,6 +211,9 @@ public class CloudBurst implements BurstGate {
         event("on");
         if (job != null) {
             onDeployed(job);
+        } else if (appName != null) {
+            // 재시작 뒤 배포 잡 없이 다시 붙인 앱. 클라우드에 남은 대기 배포를 다시 쓴다
+            pendingRecover = appName;
         }
     }
 
@@ -268,8 +277,19 @@ public class CloudBurst implements BurstGate {
         onDeployed(job);
     }
 
+    /**
+     * 에이전트가 다시 떠서 이미 떠 있던 앱 슬롯을 다시 붙였다. 배포 잡이 없으니 대기 배포는 새로 하지 않고,
+     * 클라우드에 남은 대기 배포가 있으면 대기 Pod 수를 맞추고 넘김을 다시 켠다 (없으면 다음 배포부터)
+     */
+    public void recover(String app) {
+        if (app != null && !app.isBlank() && lastJob == null) {
+            pendingRecover = app;
+        }
+    }
+
     /** 온프레미스 배포가 성공하면 클라우드에 같은 앱을 대기 배포한다 (켜져 있을 때) */
     public void onDeployed(DeployJob job) {
+        pendingRecover = null;
         lastJob = job;
         if (!enabled) {
             return;
@@ -405,6 +425,9 @@ public class CloudBurst implements BurstGate {
     }
 
     void tick(UpstreamProxy.Pressure p, long now) {
+        if (pendingRecover != null && phase == Phase.OFF) {
+            recoverPending(now);
+        }
         if (!scaleGate.getAsBoolean()) {
             lastSaturated = p.saturatedTotal();
             return;
@@ -493,6 +516,49 @@ public class CloudBurst implements BurstGate {
                 // OFF, STANDBY: 판단하지 않는다
             }
         }
+    }
+
+    private void recoverPending(long now) {
+        String app = pendingRecover;
+        if (!enabled || lastJob != null) {
+            pendingRecover = null;
+            return;
+        }
+        if (!available()) {
+            // 플랫폼 연결: welcome 으로 builder 중계와 Ingress 를 받을 때까지 기다린다
+            return;
+        }
+        pendingRecover = null;
+        String publicHost = publicHost(app);
+        if (publicHost == null) {
+            event("restore: publicHost 를 정할 수 없습니다 (BURST_PUBLIC_HOST 또는 Cloudflare zone 필요)");
+            return;
+        }
+        this.appName = app;
+        this.host = publicHost;
+        if (!scaleGate.getAsBoolean()) {
+            // 거점이 클라우드다. 거점 전환이 온프레미스로 돌아오면 resume() 이 넘김을 다시 켠다
+            event("restore: " + app + " home is cloud, waiting");
+            return;
+        }
+        BurstClient.AppState cloud;
+        try {
+            cloud = client.app(app);
+        } catch (RuntimeException e) {
+            event("restore: " + app + " has no cloud standby (" + e.getMessage() + "), next deploy");
+            return;
+        }
+        if (settings.warmReplicas() < 1) {
+            setPhase(Phase.IDLE);
+            event("restore: " + app + " cloud standby found, cloud replicas 0");
+            return;
+        }
+        if (cloud.replicas() < settings.warmReplicas()) {
+            client.scale(app, settings.warmReplicas());
+        }
+        scalingSince = now;
+        setPhase(Phase.WARMING);
+        event("restore: " + app + " warming cloud replicas " + Math.max(cloud.replicas(), settings.warmReplicas()));
     }
 
     private boolean cloudReachable() {

@@ -93,6 +93,12 @@ public final class SlotRecovery {
         return Optional.empty();
     }
 
+    /** {@code {app}-blue|green} → app */
+    public static String appOf(String container) {
+        int dash = container.lastIndexOf('-');
+        return dash > 0 ? container.substring(0, dash) : container;
+    }
+
     private Map<String, String> env(String container) {
         String listed = commands.output(List.of("docker", "inspect", "--format",
                 "{{range .Config.Env}}{{println .}}{{end}}", container));
