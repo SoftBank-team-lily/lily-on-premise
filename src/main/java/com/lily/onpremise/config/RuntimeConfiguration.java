@@ -8,6 +8,7 @@ import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.burst.CloudDatabase;
 import com.lily.onpremise.burst.DatabaseTunnel;
 import com.lily.onpremise.database.DatabaseModes;
+import com.lily.onpremise.database.DatabaseTransfer;
 import com.lily.onpremise.database.ExternalDatabase;
 import com.lily.onpremise.database.LocalDatabase;
 import com.lily.onpremise.database.ReverseTunnel;
@@ -144,7 +145,8 @@ public class RuntimeConfiguration {
                 : Path.of(dir);
         String bindHost = db == null ? "172.17.0.1" : db.bindHost();
         return new DatabaseModes(cloudDatabase(properties, commands, json, workDir),
-                new LocalDatabase(commands, workDir, bindHost), new ExternalDatabase(), reverse);
+                new LocalDatabase(commands, workDir, bindHost), new ExternalDatabase(), reverse)
+                .transfer(new DatabaseTransfer(commands));
     }
 
     private static DatabaseAccess cloudDatabase(AgentProperties properties, Commands commands, ObjectMapper json,

@@ -32,7 +32,21 @@ public record DeployJob(
         /** DB 위치. cloud(기본): 클라우드 RDS 를 터널로, local: 이 PC 에 띄운 DB, external: databaseUrl */
         String databaseMode,
         /** external 일 때 DB 주소. postgresql://user:pass@host:port/db 또는 mysql://... */
-        String databaseUrl) {
+        String databaseUrl,
+        /**
+         * local 일 때 클라우드 RDS 의 데이터를 이 PC DB 로 옮긴 뒤 띄운다 (클라우드 앱을 이 PC 로 옮길 때).
+         * RDS 접속 정보는 databaseEnv (터널 주소 기준). postgres 만
+         */
+        Boolean importDatabase) {
+
+    /** RDS 데이터를 옮기지 않는 잡 */
+    public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
+                     String healthPath, String rootDir, String dockerfile, Map<String, String> env, String database,
+                     String canaryPath, Map<String, String> migrations, Map<String, String> databaseEnv,
+                     String databaseMode, String databaseUrl) {
+        this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database,
+                canaryPath, migrations, databaseEnv, databaseMode, databaseUrl, null);
+    }
 
     /** DB 는 클라우드 RDS (이 필드 전의 잡) */
     public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
@@ -67,11 +81,17 @@ public record DeployJob(
         return databaseMode == null || databaseMode.isBlank() ? "cloud" : databaseMode;
     }
 
+    /** 이 PC DB 를 띄우기 전에 클라우드 RDS 의 데이터를 옮긴다 */
+    public boolean importsDatabase() {
+        return Boolean.TRUE.equals(importDatabase);
+    }
+
     /** DB 비밀번호가 든 주소를 로그에 남기지 않는다 */
     @Override
     public String toString() {
         return "DeployJob[id=" + id + ", appName=" + appName + ", repoUrl=" + repoUrl + ", branch=" + branch
-                + ", database=" + database + ", databaseMode=" + databaseMode + "]";
+                + ", database=" + database + ", databaseMode=" + databaseMode
+                + (importsDatabase() ? ", importDatabase=true" : "") + "]";
     }
 
     public DeployJob normalize() {
@@ -140,6 +160,15 @@ public record DeployJob(
         } else {
             url = null;
         }
+        boolean importing = Boolean.TRUE.equals(importDatabase);
+        if (importing) {
+            if (!"local".equals(mode) || !"postgres".equals(engine)) {
+                throw new IllegalArgumentException("importDatabase 는 databaseMode local, database postgres 일 때만 씁니다");
+            }
+            if (databaseEnv == null || databaseEnv.isEmpty()) {
+                throw new IllegalArgumentException("importDatabase 는 RDS 접속 정보(databaseEnv)와 같이 보냅니다");
+            }
+        }
         String secret = blankToNull(token);
         if (secret != null && !secret.matches("[A-Za-z0-9_]+")) {
             throw new IllegalArgumentException("token 형식이 올바르지 않습니다");
@@ -161,7 +190,8 @@ public record DeployJob(
                 cleanMigrations(migrations),
                 cleanEnv(databaseEnv),
                 engine == null || "cloud".equals(mode) ? null : mode,
-                url);
+                url,
+                importing ? Boolean.TRUE : null);
     }
 
     private static URI parseRepo(String repo) {
