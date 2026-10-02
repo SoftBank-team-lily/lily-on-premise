@@ -18,7 +18,7 @@ import java.util.Map;
 public class BurstClient {
 
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-    private final ObjectMapper json;
+    protected final ObjectMapper json;
     private final String baseUrl;
     private final String token;
 
@@ -26,6 +26,13 @@ public class BurstClient {
         this.json = json;
         this.baseUrl = settings.builderUrl().replaceAll("/+$", "");
         this.token = settings.token();
+    }
+
+    /** 호출을 다른 길(컨트롤 플레인 소켓)로 보내는 하위 클래스용. {@link #send} 를 바꾼다 */
+    protected BurstClient(ObjectMapper json) {
+        this.json = json;
+        this.baseUrl = "";
+        this.token = "";
     }
 
     /** 클라우드에 같은 레포를 빌드·배포하고 레플리카 0 으로 대기시킨다. 빌드 id 를 돌려준다 */
@@ -85,7 +92,7 @@ public class BurstClient {
         return new AppState(node.path("replicas").asInt(), node.path("readyReplicas").asInt());
     }
 
-    private JsonNode send(String method, String path, Object body) {
+    protected JsonNode send(String method, String path, Object body) {
         try {
             HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
                     .timeout(Duration.ofSeconds(15))

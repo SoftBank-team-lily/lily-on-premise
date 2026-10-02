@@ -28,7 +28,7 @@ class HomeCutoverTest {
 
     private final FakeDns api = new FakeDns();
     private final FakeBurst client = new FakeBurst();
-    private final RecordingBurst burst = new RecordingBurst();
+    private final RecordingBurst burst = new RecordingBurst(client);
     private final List<String> stops = new ArrayList<>();
     private final long[] now = {10_000};
     private final ManualLater later = new ManualLater();
@@ -118,11 +118,53 @@ class HomeCutoverTest {
     }
 
     @Test
-    void database_가_없으면_CNAME_을_호출하지_않는다() {
+    void 기억한_앱이_없으면_컨트롤_플레인이_준_앱의_CNAME_으로_거점을_복구한다() {
+        api.content = ORIGIN;
+        CloudflareHostnameProvisioner dns = new CloudflareHostnameProvisioner(api, cloudflare());
+        dns.openTunnel("ab12");
+        HomeCutover fresh = new HomeCutover(
+                properties(ORIGIN), dns, client, burst, job -> true, () -> true, url -> true,
+                (ingress, host) -> true, () -> null, stops::add, later, () -> now[0],
+                millis -> now[0] += 200_000, null);
+
+        fresh.restore("blog");
+
+        assertThat(fresh.status().phase()).isEqualTo("CLOUD");
+        assertThat(burst.parked).isTrue();
+        assertThatThrownBy(() -> fresh.begin("blog", "onprem")).hasMessageContaining("다시 배포");
+    }
+
+    @Test
+    void DB_없는_앱도_옮긴다() {
         cutover.note(job("job1", null, "FROM scratch\n"), false);
 
-        assertThatThrownBy(() -> cutover.begin("blog", "cloud")).hasMessageContaining("database");
-        assertThat(api.puts).isEmpty();
+        cutover.begin("blog", "cloud");
+        cutover.perform();
+
+        assertThat(api.content).isEqualTo(ORIGIN);
+        assertThat(cutover.status().phase()).isEqualTo("CLOUD");
+    }
+
+    @Test
+    void 클라우드_오리진이_없으면_거절하고_플랫폼이_주면_옮긴다() {
+        CloudflareHostnameProvisioner dns = new CloudflareHostnameProvisioner(api, cloudflare());
+        dns.openTunnel("ab12");
+        HomeCutover platform = new HomeCutover(
+                properties(""), dns, null, burst, job -> true, () -> true, url -> true,
+                (ingress, host) -> true, () -> "blog-blue", stops::add, later, () -> now[0],
+                millis -> now[0] += 200_000, null);
+        platform.note(job("job1", "postgres", null), true);
+
+        assertThat(platform.movable()).isFalse();
+        assertThatThrownBy(() -> platform.begin("blog", "cloud")).hasMessageContaining("오리진");
+
+        platform.platform(client, "10.0.0.1", 80, ORIGIN + ".");
+        assertThat(platform.movable()).isTrue();
+        platform.begin("blog", "cloud");
+        platform.perform();
+
+        assertThat(api.content).isEqualTo(ORIGIN);
+        assertThat(platform.status().phase()).isEqualTo("CLOUD");
     }
 
     @Test
@@ -169,6 +211,8 @@ class HomeCutoverTest {
         assertThat(cutover.status().phase()).isEqualTo("ONPREM");
         assertThat(burst.gate.getAsBoolean()).isTrue();
         assertThat(client.scales).isEmpty();
+
+        assertThat(burst.resumed).isTrue();
 
         later.task.run();
         assertThat(client.scales).containsExactly(1);
@@ -218,8 +262,24 @@ class HomeCutoverTest {
     }
 
     private static final class RecordingBurst implements BurstGate {
+        private final BurstClient client;
         private java.util.function.BooleanSupplier gate = () -> true;
         private boolean parked;
+        private boolean resumed;
+
+        private RecordingBurst(BurstClient client) {
+            this.client = client;
+        }
+
+        @Override
+        public void resume() {
+            resumed = true;
+        }
+
+        @Override
+        public String standby(DeployJob job, String publicHost) {
+            return client.standby(job, publicHost, job.database());
+        }
 
         @Override
         public void allowScale(java.util.function.BooleanSupplier gate) {

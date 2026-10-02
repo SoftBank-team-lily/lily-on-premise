@@ -72,15 +72,25 @@ public class RuntimeConfiguration {
 
     @Bean
     CandidateJudge candidateJudge() {
-        return new LoopbackCandidateJudge(
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build());
+        return new LoopbackCandidateJudge(loopbackHttp());
+    }
+
+    /**
+     * 앱 컨테이너에 루프백으로 보내는 헬스·판정 요청. HTTP/1.1 로 고정한다. 기본(HTTP/2)은 평문에서 h2c Upgrade 헤더를 붙이는데,
+     * Next.js 처럼 upgrade 를 웹소켓 처리기로 넘기는 서버는 응답 없이 연결을 닫아 정상 앱이 0 응답으로 거절된다
+     */
+    static HttpClient loopbackHttp() {
+        return HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(2))
+                .build();
     }
 
     @Bean
     Readiness readiness(AgentProperties properties) {
         int timeout = Math.max(1, properties.healthTimeoutSeconds());
         return new HealthProbe(
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build(),
+                loopbackHttp(),
                 Duration.ofSeconds(timeout),
                 Duration.ofSeconds(2));
     }

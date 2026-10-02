@@ -36,6 +36,9 @@ import java.util.function.Supplier;
 /**
  * 공개 주소의 CNAME 내용물만 온프레미스 터널과 클라우드 오리진 사이에서 바꾼다.
  * 목적지가 Ready 이기 전에는 DNS 를 호출하지 않고, 공개 확인이 실패하면 이전 내용물로 되돌린다.
+ *
+ * <p>플랫폼 연결이면 클라우드 오리진·Ingress·builder 호출을 컨트롤 플레인이 준다 ({@link #platform}).
+ * DNS 호출도 컨트롤 플레인이 중계한다.
  */
 public final class HomeCutover implements DeployedApp {
 
@@ -48,10 +51,11 @@ public final class HomeCutover implements DeployedApp {
     public enum Phase { ONPREM, MOVING_TO_CLOUD, CLOUD, MOVING_TO_ONPREM, UNKNOWN }
 
     private final AgentProperties.Burst burstSettings;
-    private final AgentProperties.Cloudflare cloudflare;
-    private final AgentProperties.Cutover cutover;
     private final CloudflareHostnameProvisioner dns;
-    private final BurstClient client;
+    private volatile BurstClient client;
+    private volatile String cloudOrigin;
+    private volatile String ingressHost;
+    private volatile int ingressPort;
     private final BurstGate burst;
     private final LocalDeploy localDeploy;
     private final BooleanSupplier docker;
@@ -148,8 +152,11 @@ public final class HomeCutover implements DeployedApp {
             boolean ownScheduler,
             boolean bridged) {
         this.burstSettings = properties.burst();
-        this.cloudflare = properties.cloudflare();
-        this.cutover = properties.cutover() == null ? new AgentProperties.Cutover("") : properties.cutover();
+        AgentProperties.Cutover cutover = properties.cutover() == null
+                ? new AgentProperties.Cutover("") : properties.cutover();
+        this.cloudOrigin = cutover.cloudOrigin();
+        this.ingressHost = burstSettings == null ? "" : burstSettings.ingressHost();
+        this.ingressPort = burstSettings == null ? 80 : burstSettings.ingressPort();
         this.dns = dns;
         this.client = client;
         this.burst = burst;
@@ -186,23 +193,45 @@ public final class HomeCutover implements DeployedApp {
         }
     }
 
+    /** 플랫폼 연결: builder 호출은 컨트롤 플레인 소켓으로, 오리진과 Ingress 는 컨트롤 플레인이 준 값이다 */
+    public void platform(BurstClient relay, String ingressHost, int ingressPort, String cloudOrigin) {
+        this.client = relay;
+        this.ingressHost = ingressHost == null ? "" : ingressHost;
+        this.ingressPort = ingressPort;
+        this.cloudOrigin = new AgentProperties.Cutover(cloudOrigin).cloudOrigin();
+    }
+
+    /** 전환에 필요한 연결이 다 있다. 잡과 거점에 따른 거절은 {@link #begin} 이 한다 */
+    public boolean movable() {
+        return !cloudOrigin.isBlank() && client != null && dns.configured();
+    }
+
     /** 재시작 후 마지막으로 다룬 앱의 CNAME 으로 거점을 복구한다 */
     public synchronized void restore() {
-        if (memory == null) {
+        restore(null);
+    }
+
+    /**
+     * @param fallbackApp 기억한 앱이 없을 때 쓸 앱. 에이전트 컨테이너를 새로 만들면 작업 폴더가 비어서,
+     *                    컨트롤 플레인이 이 에이전트로 마지막에 배포한 앱을 알려 준다
+     */
+    public synchronized void restore(String fallbackApp) {
+        if (phase == Phase.MOVING_TO_CLOUD || phase == Phase.MOVING_TO_ONPREM) {
             return;
         }
-        Path file = memory.resolve("cutover-app.txt");
-        if (!Files.isRegularFile(file)) {
-            return;
+        String app = "";
+        Path file = memory == null ? null : memory.resolve("cutover-app.txt");
+        if (file != null && Files.isRegularFile(file)) {
+            try {
+                app = Files.readString(file).trim();
+            } catch (IOException e) {
+                event("restore read failed");
+            }
         }
-        String app;
-        try {
-            app = Files.readString(file).trim();
-        } catch (IOException e) {
-            event("restore read failed");
-            return;
+        if (app.isBlank() && fallbackApp != null) {
+            app = fallbackApp.trim();
         }
-        if (app.isBlank() || cloudflare == null || !cloudflare.apiConfigured()) {
+        if (app.isBlank() || !dns.configured()) {
             return;
         }
         try {
@@ -213,7 +242,7 @@ public final class HomeCutover implements DeployedApp {
             if (content.equalsIgnoreCase(dns.tunnelTarget())) {
                 this.phase = Phase.ONPREM;
                 dns.holdDns(false);
-            } else if (!cutover.blank() && content.equalsIgnoreCase(cutover.cloudOrigin())) {
+            } else if (!cloudOrigin.isBlank() && content.equalsIgnoreCase(cloudOrigin)) {
                 this.phase = Phase.CLOUD;
                 dns.holdDns(true);
                 burst.park();
@@ -285,29 +314,28 @@ public final class HomeCutover implements DeployedApp {
     }
 
     private void reject(String app, Place want) {
-        if (cutover.blank()) {
-            throw new IllegalArgumentException("CUTOVER_CLOUD_ORIGIN 이 없습니다");
+        if (cloudOrigin.isBlank()) {
+            throw new IllegalArgumentException("클라우드 오리진이 없습니다 (CUTOVER_CLOUD_ORIGIN 또는 플랫폼 연결)");
         }
-        if (CloudflareHostnameProvisioner.ip(cutover.cloudOrigin())) {
+        if (CloudflareHostnameProvisioner.ip(cloudOrigin)) {
             throw new IllegalArgumentException("CUTOVER_CLOUD_ORIGIN 은 호스트 이름이어야 합니다");
         }
-        if (cloudflare == null || !cloudflare.apiConfigured()) {
-            throw new IllegalArgumentException("Cloudflare API 설정이 없습니다");
+        if (!dns.configured()) {
+            throw new IllegalArgumentException("공개 주소가 플랫폼 존에 없습니다 (Cloudflare 터널 필요)");
         }
-        if (burstSettings == null || burstSettings.builderUrl().isBlank() || burstSettings.token().isBlank()) {
-            throw new IllegalArgumentException("BURST_BUILDER_URL 과 BURST_API_TOKEN 이 필요합니다");
+        if (client == null) {
+            throw new IllegalArgumentException("builder 연결이 없습니다 (BURST_BUILDER_URL·BURST_API_TOKEN 또는 플랫폼 연결)");
         }
-        if (want == Place.CLOUD && burstSettings.ingressHost().isBlank()) {
+        if (want == Place.CLOUD && ingressHost.isBlank()) {
             throw new IllegalArgumentException("클라우드 Ingress 가 없습니다");
         }
         if (job == null) {
-            throw new IllegalArgumentException("배포된 앱이 없습니다");
+            throw new IllegalArgumentException(phase == Phase.CLOUD
+                    ? "에이전트가 다시 시작돼 앱 설정을 모릅니다. 다시 배포한 뒤 옮겨 주세요"
+                    : "배포된 앱이 없습니다");
         }
         if (!job.appName().equals(app)) {
             throw new IllegalArgumentException("앱이 다릅니다");
-        }
-        if (job.database() == null) {
-            throw new IllegalArgumentException("database 가 없습니다");
         }
         if (!repoDockerfile && (job.dockerfile() == null || job.dockerfile().isBlank())) {
             throw new IllegalArgumentException("Dockerfile 이 없습니다");
@@ -339,7 +367,7 @@ public final class HomeCutover implements DeployedApp {
             }
             String host = dns.hostname(app);
             try {
-                moveDns(host, cutover.cloudOrigin());
+                moveDns(host, cloudOrigin);
             } catch (RuntimeException e) {
                 client.scale(app, warm);
                 phase(Phase.ONPREM);
@@ -389,7 +417,7 @@ public final class HomeCutover implements DeployedApp {
             String url = "https://" + host + OnPremPipeline.probePath(current.canaryPath(), current.healthPath());
             if (!publicOk.test(url)) {
                 try {
-                    moveDns(host, cutover.cloudOrigin());
+                    moveDns(host, cloudOrigin);
                     stopIf(Phase.MOVING_TO_ONPREM, liveContainer.get());
                     phase(Phase.CLOUD);
                 } catch (RuntimeException e) {
@@ -399,6 +427,9 @@ public final class HomeCutover implements DeployedApp {
                 throw new IllegalStateException("공개 주소 확인에 실패했습니다");
             }
             phase(Phase.ONPREM);
+            if (burst != null) {
+                burst.resume();
+            }
             int warm = burstSettings.warmReplicas();
             later.after(DRAIN_MILLIS, () -> {
                 if (phase != Phase.ONPREM || client == null) {
@@ -423,7 +454,8 @@ public final class HomeCutover implements DeployedApp {
 
     private void waitStandby(DeployJob current) {
         String host = dns.hostname(current.appName());
-        String id = client.standby(current, host, current.database());
+        // DB 위치가 이 PC 면 역방향 터널 접속 정보로 보내야 해서 버스팅과 같은 길로 보낸다
+        String id = burst != null ? burst.standby(current, host) : client.standby(current, host, current.database());
         if (!await(() -> standbyDone(id), STANDBY_TIMEOUT_MILLIS)) {
             throw new IllegalStateException("클라우드 대기 배포가 끝나지 않았습니다");
         }
@@ -440,7 +472,7 @@ public final class HomeCutover implements DeployedApp {
     private boolean cloudReady() {
         BurstClient.AppState app = client.app(job.appName());
         return app.readyReplicas() >= 1
-                && reachesPod.test(new InetSocketAddress(burstSettings.ingressHost(), burstSettings.ingressPort()),
+                && reachesPod.test(new InetSocketAddress(ingressHost, ingressPort),
                 dns.hostname(job.appName()));
     }
 
@@ -484,7 +516,7 @@ public final class HomeCutover implements DeployedApp {
     }
 
     private String hostOf(String app) {
-        if (app == null || app.isBlank() || cloudflare == null || !cloudflare.apiConfigured()) {
+        if (app == null || app.isBlank() || !dns.configured()) {
             return "";
         }
         try {

@@ -148,15 +148,134 @@ class CloudBurstTest {
         assertThat(proxy.overflowing()).isFalse();
     }
 
+    @Test
+    void 끄면_넘김을_멈추고_클라우드를_0_으로_내린다() throws Exception {
+        CloudBurst burst = warmed();
+
+        burst.apply("blog", false, 0);
+
+        assertThat(burst.status().enabled()).isFalse();
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
+        assertThat(proxy.overflowing()).isFalse();
+        assertThat(client.scales).containsExactly(1, 0);
+
+        // 꺼져 있으면 배포가 끝나도 대기 배포하지 않는다
+        burst.onDeployed(job("j2"));
+        assertThat(client.standbys).containsExactly("j1@blog.example.com");
+    }
+
+    @Test
+    void 다시_켜면_마지막_배포로_대기_배포하고_비율을_프록시에_건다() throws Exception {
+        CloudBurst burst = warmed();
+        burst.apply("blog", false, 0);
+
+        burst.apply("blog", true, 30);
+        waitPast(burst, CloudBurst.Phase.STANDBY);
+
+        assertThat(client.standbys).containsExactly("j1@blog.example.com", "j1@blog.example.com");
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.WARMING);
+        assertThat(burst.status().cloudPercent()).isEqualTo(30);
+        assertThat(proxy.cloudShare()).isEqualTo(30);
+    }
+
+    @Test
+    void 다른_앱_설정은_무시한다() throws Exception {
+        CloudBurst burst = warmed();
+
+        burst.apply("other", false, 50);
+
+        assertThat(burst.status().enabled()).isTrue();
+        assertThat(proxy.cloudShare()).isZero();
+    }
+
+    @Test
+    void 처음에_꺼져_있으면_배포만_기억하고_켤_때_대기_배포한다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1, false), null, proxy, client, (ingress, host) -> podReachable);
+        burst.onDeployed(job("j1"));
+        assertThat(client.standbys).isEmpty();
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
+
+        burst.apply("", true, 0);
+        waitPast(burst, CloudBurst.Phase.STANDBY);
+
+        assertThat(client.standbys).containsExactly("j1@blog.example.com");
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.WARMING);
+    }
+
+    @Test
+    void 플랫폼이_준_존과_Ingress_로_대기_배포한다() throws Exception {
+        AgentProperties.Burst bare = new AgentProperties.Burst(false, "", "", "", 80, "", LIMIT, 3, 30, 2, 1, "");
+        CloudBurst burst = new CloudBurst(bare, null, proxy, null, (ingress, host) -> podReachable);
+        assertThat(burst.available()).isFalse();
+
+        burst.platform(client, "10.0.0.1", 80, "lilycloud.kr");
+        burst.apply("", true, 0);
+        burst.onDeployed(job("j1"));
+        waitPast(burst, CloudBurst.Phase.STANDBY);
+
+        assertThat(burst.available()).isTrue();
+        assertThat(client.standbys).containsExactly("j1@blog.lilycloud.kr");
+    }
+
+    @Test
+    void 거점이_돌아오면_대기_Pod_로_다시_넘긴다() throws Exception {
+        CloudBurst burst = warmed();
+        burst.park();
+        assertThat(proxy.overflowing()).isFalse();
+
+        burst.resume();
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.WARMING);
+        burst.tick(idle(), System.currentTimeMillis());
+
+        assertThat(proxy.overflowing()).isTrue();
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.IDLE);
+    }
+
+    @Test
+    void 비율로_나누는_중에는_클라우드_요청이_있어도_한가하면_내린다() throws Exception {
+        CloudBurst burst = warmed();
+        burst.apply("blog", true, 50);
+        burst.tick(saturated(1), at(10));
+        burst.tick(saturated(2), at(13));
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OVERFLOWING);
+
+        UpstreamProxy.Pressure sharing = new UpstreamProxy.Pressure(1, 3, LIMIT, 2, 50, 0);
+        burst.tick(sharing, at(14));
+        burst.tick(sharing, at(44));
+
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.IDLE);
+        assertThat(client.scales).containsExactly(1, 2, 1);
+        assertThat(proxy.overflowing()).isTrue();
+    }
+
+    @Test
+    void 거점이_클라우드면_대기_배포가_끝나도_레플리카를_내리지_않는다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+        burst.allowScale(() -> false);
+        burst.onDeployed(job("j1"));
+        waitPast(burst, CloudBurst.Phase.STANDBY);
+
+        assertThat(client.scales).isEmpty();
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
+    }
+
+    private static DeployJob job(String id) {
+        return new DeployJob(id, "https://github.com/a/b", "main", null, "blog", 8080,
+                "/health", null, null, Map.of());
+    }
+
+    private static void waitPast(CloudBurst burst, CloudBurst.Phase phase) throws InterruptedException {
+        for (int i = 0; i < 200 && burst.status().phase() == phase; i++) {
+            Thread.sleep(10);
+        }
+    }
+
     /** 대기 배포까지 끝난 상태 (WARMING 또는 warm 0 이면 IDLE) */
     private CloudBurst deployed(int warmReplicas) throws InterruptedException {
         CloudBurst burst = new CloudBurst(settings(warmReplicas), null, proxy, client,
                 (ingress, host) -> podReachable);
-        burst.onDeployed(new DeployJob("j1", "https://github.com/a/b", "main", null, "blog", 8080,
-                "/health", null, null, Map.of()));
-        for (int i = 0; i < 100 && burst.status().phase() == CloudBurst.Phase.STANDBY; i++) {
-            Thread.sleep(10);
-        }
+        burst.onDeployed(job("j1"));
+        waitPast(burst, CloudBurst.Phase.STANDBY);
         return burst;
     }
 
@@ -186,7 +305,11 @@ class CloudBurstTest {
     }
 
     private static AgentProperties.Burst settings(int warmReplicas) {
-        return new AgentProperties.Burst(true, "http://builder", "t", "127.0.0.1", 80, "{app}.example.com",
+        return settings(warmReplicas, true);
+    }
+
+    private static AgentProperties.Burst settings(int warmReplicas, boolean enabled) {
+        return new AgentProperties.Burst(enabled, "http://builder", "t", "127.0.0.1", 80, "{app}.example.com",
                 LIMIT, 3, 30, 2, warmReplicas, "");
     }
 
@@ -199,8 +322,12 @@ class CloudBurstTest {
             super(settings(1), new ObjectMapper());
         }
 
+        final List<String> standbys = new ArrayList<>();
+
         @Override
-        public String standby(DeployJob job, String host, String database) {
+        public synchronized String standby(DeployJob job, String host, String database,
+                                           Map<String, String> databaseEnv) {
+            standbys.add(job.id() + "@" + host);
             return "b1";
         }
 

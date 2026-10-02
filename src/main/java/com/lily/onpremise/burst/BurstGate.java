@@ -13,4 +13,13 @@ public interface BurstGate {
     void whenStandby(Consumer<DeployJob> listener);
 
     void park();
+
+    /** 거점이 온프레미스로 돌아왔다. 버스팅이 켜져 있으면 대기 Pod 로 다시 넘긴다 */
+    void resume();
+
+    /**
+     * 클라우드에 같은 잡을 대기 배포한다 (레플리카 0). DB 위치가 이 PC 면 역방향 터널 접속 정보로 보낸다.
+     * @return builder 빌드 id
+     */
+    String standby(DeployJob job, String publicHost);
 }
