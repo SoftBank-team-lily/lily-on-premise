@@ -249,13 +249,39 @@ class CloudBurstTest {
     }
 
     @Test
-    void 거점이_클라우드면_대기_배포가_끝나도_레플리카를_내리지_않는다() throws Exception {
+    void 대기_배포_중에_거점이_클라우드로_바뀌면_끝나도_레플리카를_내리지_않는다() throws Exception {
         CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
-        burst.allowScale(() -> false);
+        boolean[] onPrem = {true};
+        burst.allowScale(() -> onPrem[0]);
         burst.onDeployed(job("j1"));
+        onPrem[0] = false;
         waitPast(burst, CloudBurst.Phase.STANDBY);
 
         assertThat(client.scales).isEmpty();
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
+    }
+
+    @Test
+    void 거점이_클라우드면_버스팅을_켜지_않는다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1, false), null, proxy, client, (ingress, host) -> podReachable);
+        burst.onDeployed(job("j1"));
+        burst.allowScale(() -> false);
+
+        burst.apply("blog", true, 0);
+
+        assertThat(burst.status().enabled()).isFalse();
+        assertThat(client.standbys).isEmpty();
+        assertThat(burst.status().events().get(0)).contains("공개 주소가 클라우드");
+    }
+
+    @Test
+    void 거점이_클라우드면_다시_배포해도_대기_배포하지_않는다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+        burst.allowScale(() -> false);
+
+        burst.onDeployed(job("j1"));
+
+        assertThat(client.standbys).isEmpty();
         assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
     }
 
