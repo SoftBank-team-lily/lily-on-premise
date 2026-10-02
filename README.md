@@ -253,6 +253,18 @@ Active Slot은 프록시 upstream이 가리키는 루프백 포트입니다.
 
 이미지 태그는 `lily-onprem/{appName}:{jobId}`입니다. 태그에는 레지스트리 호스트가 없습니다.
 
+### 에이전트 재시작
+
+Active Slot은 프로세스 메모리(`SlotBook`)에만 있습니다. 에이전트가 다시 뜨면 기동할 때 `SlotRecovery`가 이어 붙입니다.
+
+1. `docker ps`에서 슬롯 포트(`127.0.0.1:18080|18081`)에 떠 있고 TCP로 응답하는 `{appName}-blue|green`을 찾아 프록시 upstream과 `SlotBook`에 다시 붙입니다. 두 슬롯이 다 떠 있으면 최근에 만든 쪽입니다
+2. 그 앱의 환경변수가 RDS 터널 주소(`172.17.0.1:15432`)를 쓰면 DB 터널을 다시 엽니다. 플랫폼 연결은 welcome으로 인증서를 받은 뒤 엽니다
+3. 거점을 확인한 뒤 버스팅에 알립니다. 버스팅이 켜져 있고 클라우드에 대기 배포가 남아 있으면 대기 Pod 수를 맞추고 넘김을 다시 켭니다 (아래 클라우드 버스팅)
+
+앱 컨테이너는 `--restart unless-stopped`로 떠서 PC를 다시 켜도 Docker가 앱을 다시 띄웁니다. 롤백 기록(직전 슬롯)은 되살리지 않습니다. 다음 배포부터 다시 쌓입니다.
+
+검증 (2026-10-02, burst-demo): 앱 컨테이너를 둔 채 에이전트만 재시작하는 동안 0.25초 간격 `/api/posts` 39건 모두 200 (재시작 중에는 lily-builder 엣지 Worker가 클라우드로, 약 19초 뒤부터 다시 PC). 수정 전에는 다시 배포할 때까지 503이었습니다.
+
 ---
 
 ## DeployJob
@@ -312,8 +324,9 @@ Active Slot은 프록시 upstream이 가리키는 루프백 포트입니다.
 분석 이후에 실행됩니다.
 
 * `docker build`로 로컬 태그를 만듭니다. 메모리·CPU·프로세스 한도가 있고, 호스트 디렉터리와 Docker 소켓은 넘기지 않습니다. 에이전트가 만든 Dockerfile은 의존성을 받는 `RUN`만 네트워크를 사용합니다
-* `docker run`은 `127.0.0.1:{slotPort}:{targetPort}`만 엽니다. 같은 한도와 `no-new-privileges`가 적용되고 capability는 없습니다. 컨테이너 포트가 1024 미만일 때만 `NET_BIND_SERVICE`를 넣습니다. `--restart unless-stopped`라 PC를 다시 켜면 Docker가 앱을 다시 띄웁니다
+* `docker run`은 `127.0.0.1:{slotPort}:{targetPort}`만 엽니다. 같은 한도와 `no-new-privileges`가 적용되고 capability는 없습니다. 컨테이너 포트가 1024 미만일 때만 `NET_BIND_SERVICE`를 넣습니다.
 * 지우려는 컨테이너가 없으면 슬롯이 이미 비어 있는 것으로 보고 계속 진행합니다
+* 앱 컨테이너는 `--restart unless-stopped`로 띄웁니다. PC를 다시 켜면 Docker가 앱을 다시 띄우고, 에이전트는 기동할 때 그 슬롯을 다시 붙입니다
 * Docker 데몬 오류는 배포 실패로 처리합니다
 
 ### Readiness
@@ -676,6 +689,8 @@ SPRING_PROFILES_ACTIVE=local
 - 수동 비율: 소켓 `{"type":"burst","app","enabled","cloudPercent"}` (0~100). 대기 Pod 에 닿은 뒤 요청마다 그 확률로 클라우드에 보낸다. 넘침 넘김은 비율과 별개로 그대로다
 - 거점 전환 중에는 켜기·끄기를 거절하고, 공개 주소가 클라우드면 켜기를 거절한다 (늦게 끝난 대기 배포가 공개 주소를 받는 클라우드 Pod 를 0 으로 내리는 문제)
 - 상태 보고 `burst-state` (3초마다): 버스팅 `enabled`·`cloudPercent`·`phase`·처리 중 요청, 거점 `home`·`homeSteps`·`homeStep`·`homeCancellable`·`databaseMode`·`databaseMovable`, 자원 `homeCpuPercent`·`homeMemoryMiB`·`homeMemoryPercent`(docker stats)·`homeP95Ms`(이 PC 가 처리한 최근 5분 요청)
+- 에이전트가 다시 뜨면 다시 붙인 앱으로 버스팅을 이어 간다 (`CloudBurst.recover`). 대기 배포를 새로 하지 않고, 클라우드에 남은 대기 배포의 레플리카를 `warmReplicas` 로 맞춘 뒤 닿으면 넘김을 켠다. 대기 배포가 없거나(404) 버스팅이 꺼져 있으면 다음 배포를 기다린다. 거점이 클라우드면 앱만 기억하고 거점이 돌아올 때 이어 간다
+- PC 가 꺼졌을 때는 버스팅이 아니라 lily-builder 의 엣지 Worker 와 CNAME 전환이 클라우드로 보낸다 (lily-builder `docs/장애-자동-전환.md`)
 
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
@@ -706,6 +721,8 @@ SPRING_PROFILES_ACTIVE=local
 - 터널은 Docker 브리지 게이트웨이(172.17.0.1)에만 열린다. 컨테이너에서만 닿고 LAN 에는 노출되지 않는다
 - 배스천 계정은 lily-db-provisioner 의 `deploy/k3s/cluster/db-tunnel-user.sh` 로 만든다 (셸 없음, RDS:5432 포워딩만)
 - 커넥션: 온프레미스 슬롯 최대 2 + 클라우드 `BURST_REPLICAS`, 각 풀 3 → 20 이하
+- 터널은 처음 연 뒤 5초마다 로컬 포트를 보고, 닫혀 있으면 다시 연다 (PC 가 잠들었다 깨거나 네트워크가 끊겨 ssh 가 끝난 경우). `ServerAliveInterval=10` 이라 끊긴 연결은 30초 안에 끝난다
+- 에이전트가 다시 뜨면 다시 붙인 앱이 이 터널을 쓸 때 터널을 연다 (`SlotRecovery`)
 
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
@@ -719,7 +736,6 @@ DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를
 
 검증 (2026-09-30): 온프레미스에서 쓴 글을 버스팅된 클라우드 Pod 가 읽고, 클라우드 Pod 에 쓴 글을 스케일 다운 뒤 온프레미스에서 읽음.
 
-- RDS 터널(`ssh -L`)은 처음 연 뒤 5초마다 로컬 포트를 보고, 닫혀 있으면 다시 연다 (`ServerAliveInterval` 10). 검증 (2026-10-02): 에이전트 안의 `ssh -L` 을 죽이면 약 1.2초 뒤 다시 열리고 앱 API 200
 
 ## DB 위치
 
@@ -747,7 +763,7 @@ DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를
 - `VERIFY` 는 공개 주소를 2초 간격으로 30초까지 다시 연다. 30초 안에 한 번도 성공하지 못하면 CNAME 을 되돌린다 (CNAME 을 바꾼 직후 Cloudflare 반영 전 2~4초 오류 때문)
 - 취소는 소켓 `home-cancel`. `DNS` 전 단계에서만 받고, 출발 거점으로 돌아간다
 - 버스팅 대기 배포 중에는 거점 전환을 거절한다
-- 에이전트가 다시 뜨면 CNAME 을 보고 거점을 복구한다
+- 에이전트가 다시 뜨면 CNAME 을 보고 거점을 복구한다 (슬롯·DB 터널·버스팅은 [에이전트 재시작](#에이전트-재시작))
 
 ### DB 이전 (`migrateDatabase`)
 
@@ -757,13 +773,6 @@ PostgreSQL 이고 DB 가 출발 거점 쪽에 있을 때만 된다 (클라우드
 - 온프레미스로: 클라우드를 0 으로 내려 쓰기를 멈춤 → RDS 를 이 PC DB 로 가져와 로컬 배포(`importDatabase`) → 주소 전환. 덮어쓰기 전에 이 PC DB 를 `{db}_bak_{시각}` 으로 복제한다 (마지막 하나만)
 - 복사 뒤 테이블 목록과 테이블별 행 수를 비교한다. 원본 DB 는 지우지 않는다
 - 주소 전환 전에 실패하면 쓰기 멈춤을 풀고 원본 쪽이 계속 받는다
-
-## 재시작 복구
-
-에이전트를 다시 띄워도 앱 컨테이너는 `--restart unless-stopped` 로 살아 있다.
-
-- 기동할 때 슬롯 포트에 떠 있는 `{app}-blue`·`{app}-green` 을 찾아 프록시 upstream 으로 다시 붙이고, 그 앱이 쓰던 DB 터널도 다시 연다 (`SlotRecovery`). 롤백 기록은 되살리지 않는다
-- 버스팅이 켜져 있고 클라우드 대기 배포가 남아 있으면 대기 Pod 수를 맞추고 닿으면 넘김을 다시 켠다. 거점이 클라우드면 앱만 기억하고 거점이 돌아올 때 이어 간다
 
 ## 5xx 사건 보고
 
