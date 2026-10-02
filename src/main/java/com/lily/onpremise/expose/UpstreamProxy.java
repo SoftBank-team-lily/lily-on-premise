@@ -65,6 +65,8 @@ public final class UpstreamProxy implements AutoCloseable {
     private final AtomicLong overflowed = new AtomicLong();
     /** 클라우드가 게이트웨이 오류를 돌려주어 로컬이 다시 처리한 요청 수 (누적) */
     private final AtomicLong fallback = new AtomicLong();
+    /** 내 PC 가 처리한 요청의 시간 (최근 5분). 화면의 HOME p95 */
+    private final LatencyWindow localLatency = new LatencyWindow(5 * 60_000L, 2048);
     private Thread acceptThread;
 
     public UpstreamProxy(int requestedPort) {
@@ -146,6 +148,11 @@ public final class UpstreamProxy implements AutoCloseable {
         return cloudPercent;
     }
 
+    /** 최근 5분 동안 내 PC 가 처리한 요청의 p95 (ms). 요청이 없었으면 -1 */
+    public long localP95Millis() {
+        return localLatency.p95(System.currentTimeMillis());
+    }
+
     public Pressure pressure() {
         return new Pressure(localActive.get(), remoteActive.get(), localLimit, saturated.get(), overflowed.get(),
                 fallback.get());
@@ -199,9 +206,13 @@ public final class UpstreamProxy implements AutoCloseable {
                 }
                 Slot slot = acquire();
                 boolean keep;
+                long started = System.nanoTime();
                 try {
                     keep = exchange(client, request, in, out, port, slot, upstreams);
                 } finally {
+                    if (slot.remote == null) {
+                        localLatency.record(System.currentTimeMillis(), (System.nanoTime() - started) / 1_000_000);
+                    }
                     slot.release();
                 }
                 if (!keep) {
