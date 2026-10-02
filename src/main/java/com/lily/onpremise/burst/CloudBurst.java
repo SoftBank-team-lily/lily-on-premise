@@ -230,6 +230,11 @@ public class CloudBurst implements BurstGate {
         this.onPremDatabase = databases;
     }
 
+    @Override
+    public void standbyAgain(DeployJob job) {
+        onDeployed(job);
+    }
+
     /** 온프레미스 배포가 성공하면 클라우드에 같은 앱을 대기 배포한다 (켜져 있을 때) */
     public void onDeployed(DeployJob job) {
         lastJob = job;

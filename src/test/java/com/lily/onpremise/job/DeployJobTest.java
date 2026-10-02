@@ -91,6 +91,10 @@ class DeployJobTest {
         assertThat(inbound.homeApp()).isEqualTo("blog");
         assertThat(inbound.home()).isEqualTo("cloud");
         assertThat(inbound.id()).isEqualTo("h1234567");
+        assertThat(inbound.migrateDatabase()).isFalse();
+
+        assertThat(JobMessages.read("{\"type\":\"home\",\"app\":\"blog\",\"home\":\"cloud\",\"migrateDatabase\":true}")
+                .migrateDatabase()).isTrue();
     }
 
     @Test

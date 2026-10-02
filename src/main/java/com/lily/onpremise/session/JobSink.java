@@ -12,5 +12,10 @@ public interface JobSink {
     JobRecord rollback(String app, String id);
 
     /** 공개 주소의 거점을 cloud 또는 onprem 으로 옮긴다 */
-    HomeCutover.Status home(String app, String target, String id);
+    default HomeCutover.Status home(String app, String target, String id) {
+        return home(app, target, id, false);
+    }
+
+    /** @param migrateDatabase 앱 DB 도 옮긴다 (클라우드로: 내 PC → RDS, 온프레미스로: RDS → 내 PC) */
+    HomeCutover.Status home(String app, String target, String id, boolean migrateDatabase);
 }

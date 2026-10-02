@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -36,6 +37,11 @@ import java.util.function.Supplier;
 /**
  * 공개 주소의 CNAME 내용물만 온프레미스 터널과 클라우드 오리진 사이에서 바꾼다.
  * 목적지가 Ready 이기 전에는 DNS 를 호출하지 않고, 공개 확인이 실패하면 이전 내용물로 되돌린다.
+ *
+ * <p>DB 위치가 내 PC 이고 클라우드로 옮기면서 DB 도 옮기면(migrateDatabase) 쓰기를 멈추고 내 PC DB 를 RDS 로 복사한 뒤
+ * 클라우드 앱을 RDS 로 띄운다. 온프레미스로 돌아오면서 옮기면 클라우드를 0 으로 내려 쓰기를 멈추고 RDS 를 내 PC DB 로
+ * 복사한 뒤 로컬로 띄운다. 어느 쪽이든 원본은 그때까지 트래픽을 받던 쪽 DB 이고, 주소를 옮기기 전에 실패하면
+ * 원본 쪽이 계속 받는다.
  *
  * <p>플랫폼 연결이면 클라우드 오리진·Ingress·builder 호출을 컨트롤 플레인이 준다 ({@link #platform}).
  * DNS 호출도 컨트롤 플레인이 중계한다.
@@ -78,6 +84,8 @@ public final class HomeCutover implements DeployedApp {
     private volatile String cnameContent = "";
     private volatile boolean keepMoving;
     private Place pending;
+    private boolean pendingMigrate;
+    private volatile DatabaseMove databaseMove;
     private final DelegatingDeploy bridge;
 
     public HomeCutover(
@@ -201,6 +209,15 @@ public final class HomeCutover implements DeployedApp {
         this.cloudOrigin = new AgentProperties.Cutover(cloudOrigin).cloudOrigin();
     }
 
+    /** DB 를 옮길 수단. 없으면 migrateDatabase 전환을 거절한다 */
+    public void databaseMove(DatabaseMove move) {
+        this.databaseMove = move;
+    }
+
+    public BurstClient client() {
+        return client;
+    }
+
     /** 전환에 필요한 연결이 다 있다. 잡과 거점에 따른 거절은 {@link #begin} 이 한다 */
     public boolean movable() {
         return !cloudOrigin.isBlank() && client != null && dns.configured();
@@ -272,7 +289,20 @@ public final class HomeCutover implements DeployedApp {
     }
 
     public synchronized Status status() {
-        return new Status(phase.name(), appName, hostOf(appName), cnameContent, false, copyEvents());
+        return status(false);
+    }
+
+    private Status status(boolean already) {
+        DeployJob current = job;
+        String mode = current == null || current.database() == null ? "" : current.databaseModeOrDefault();
+        return new Status(phase.name(), appName, hostOf(appName), cnameContent, already, copyEvents(), mode,
+                databaseMovable(current));
+    }
+
+    /** 이 앱 DB 를 거점과 같이 옮길 수 있다 (postgres, 내 PC 또는 RDS) */
+    private boolean databaseMovable(DeployJob current) {
+        return databaseMove != null && current != null && "postgres".equals(current.database())
+                && ("local".equals(current.databaseModeOrDefault()) || "cloud".equals(current.databaseModeOrDefault()));
     }
 
     /**
@@ -280,6 +310,13 @@ public final class HomeCutover implements DeployedApp {
      * 이미 그 거점이면 {@code already} 가 참이고 단계는 바꾸지 않는다.
      */
     public synchronized Status begin(String app, String target) {
+        return begin(app, target, false);
+    }
+
+    /**
+     * @param migrateDatabase 클라우드로: 내 PC DB → RDS, 온프레미스로: RDS → 내 PC DB 로 옮기면서 전환한다
+     */
+    public synchronized Status begin(String app, String target, boolean migrateDatabase) {
         Place want = place(target);
         if (phase == Phase.MOVING_TO_CLOUD || phase == Phase.MOVING_TO_ONPREM) {
             throw new IllegalArgumentException("이미 전환 중입니다");
@@ -288,28 +325,35 @@ public final class HomeCutover implements DeployedApp {
             throw new IllegalArgumentException("거점을 알지 못합니다");
         }
         if ((want == Place.CLOUD && phase == Phase.CLOUD) || (want == Place.ONPREM && phase == Phase.ONPREM)) {
-            return new Status(phase.name(), appName, hostOf(appName), cnameContent, true, copyEvents());
+            return status(true);
         }
         reject(app, want);
+        if (migrateDatabase) {
+            rejectMigrate(want);
+        }
         pending = want;
+        pendingMigrate = migrateDatabase;
         phase(want == Place.CLOUD ? Phase.MOVING_TO_CLOUD : Phase.MOVING_TO_ONPREM);
-        event("move: " + want.name().toLowerCase());
+        event("move: " + want.name().toLowerCase() + (migrateDatabase ? " with database" : ""));
         return status();
     }
 
     public void perform() {
         Place want;
+        boolean migrate;
         synchronized (this) {
             want = pending;
+            migrate = pendingMigrate;
             pending = null;
+            pendingMigrate = false;
         }
         if (want == null) {
             return;
         }
         if (want == Place.CLOUD) {
-            toCloud();
+            toCloud(migrate);
         } else {
-            toOnPrem();
+            toOnPrem(migrate);
         }
     }
 
@@ -348,14 +392,49 @@ public final class HomeCutover implements DeployedApp {
         }
     }
 
-    private void toCloud() {
+    /** DB 를 옮기려면 postgres 이고, 옮기기 전 위치가 출발 거점 쪽이어야 한다 */
+    private void rejectMigrate(Place want) {
+        if (databaseMove == null) {
+            throw new IllegalArgumentException("이 에이전트는 DB 를 옮길 수 없습니다");
+        }
+        if (!"postgres".equals(job.database())) {
+            throw new IllegalArgumentException("DB 이전은 postgres 앱만 됩니다");
+        }
+        String mode = job.databaseModeOrDefault();
+        if (want == Place.CLOUD && !"local".equals(mode)) {
+            throw new IllegalArgumentException("DB 가 내 PC 에 있을 때만 RDS 로 옮깁니다 (지금: " + mode + ")");
+        }
+        if (want == Place.ONPREM && !"cloud".equals(mode)) {
+            throw new IllegalArgumentException("DB 가 RDS 에 있을 때만 내 PC 로 옮깁니다 (지금: " + mode + ")");
+        }
+    }
+
+    private void toCloud(boolean migrate) {
         DeployJob current = job;
+        DeployJob target = migrate ? current.withDatabase("cloud", null, false) : current;
         String known = cloudJobId;
         String app = current.appName();
         int warm = burstSettings.warmReplicas();
         keepMoving = false;
+        boolean paused = false;
+        boolean redeployed = false;
         try {
-            if (known == null || !known.equals(current.id())) {
+            if (migrate) {
+                // 클라우드 대기 Pod 가 RDS 를 보게 바꾸는 동안 버스팅이 그쪽으로 넘기지 않게 한다
+                if (burst != null) {
+                    burst.park();
+                }
+                event("database: RDS 준비");
+                Map<String, String> rds = databaseMove.rdsEnv(target);
+                redeployed = true;
+                waitStandby(target);
+                cloudJobId = target.id();
+                event("database: 쓰기 멈춤");
+                databaseMove.pause(true);
+                paused = true;
+                event("database: 내 PC → RDS 복사");
+                databaseMove.toRemote(app, rds);
+            } else if (known == null || !known.equals(current.id())) {
                 waitStandby(current);
                 cloudJobId = current.id();
             }
@@ -385,6 +464,11 @@ public final class HomeCutover implements DeployedApp {
                 throw new IllegalStateException("공개 주소 확인에 실패했습니다");
             }
             String container = liveContainer.get();
+            if (migrate) {
+                // 점검은 거점이 돌아올 때까지 켜 둔다. 남은 터널 요청이 내 PC DB 에 쓰지 않게
+                job = target;
+                event("database: RDS (내 PC DB 는 그대로 남음)");
+            }
             phase(Phase.CLOUD);
             later.after(DRAIN_MILLIS, () -> stopIf(Phase.CLOUD, container));
             event("home: cloud");
@@ -392,45 +476,96 @@ public final class HomeCutover implements DeployedApp {
             if (!keepMoving && phase == Phase.MOVING_TO_CLOUD) {
                 phase(Phase.ONPREM);
             }
+            if (!keepMoving && paused) {
+                databaseMove.pause(false);
+            }
+            if (!keepMoving && redeployed) {
+                restoreStandby(current);
+            }
             event(e.getMessage());
             throw e;
         }
     }
 
-    private void toOnPrem() {
+    /** 클라우드 대기 배포가 RDS 를 보고 있다. 내 PC DB 를 다시 보게 되돌린다 (버스팅이 꺼져 있으면 다음 전환 때) */
+    private void restoreStandby(DeployJob original) {
+        cloudJobId = null;
+        try {
+            client.scale(original.appName(), 0);
+        } catch (RuntimeException e) {
+            event("scale down failed: " + e.getMessage());
+        }
+        if (burst != null) {
+            burst.standbyAgain(original);
+        }
+    }
+
+    private void toOnPrem(boolean migrate) {
         DeployJob current = job;
         String app = current.appName();
         keepMoving = false;
+        boolean cloudStopped = false;
         try {
-            if (!localDeploy.deploy(current)) {
-                phase(Phase.CLOUD);
+            DeployJob target = current;
+            if (migrate) {
+                event("database: RDS 연결");
+                Map<String, String> rds = databaseMove.rdsEnv(current);
+                // 클라우드를 0 으로 내려 RDS 쓰기를 멈춘다 (Ingress 가 503). 로컬 배포가 RDS 를 내 PC DB 로 복사한다
+                event("database: 쓰기 멈춤");
+                client.scale(app, 0);
+                cloudStopped = true;
+                event("database: RDS → 내 PC 복사");
+                target = current.withDatabase("local", rds, true);
+            }
+            if (!localDeploy.deploy(target)) {
                 throw new IllegalStateException("로컬 배포에 실패했습니다");
+            }
+            if (databaseMove != null) {
+                databaseMove.pause(false);
             }
             String host = dns.hostname(app);
             try {
                 moveDns(host, dns.tunnelTarget());
             } catch (RuntimeException e) {
                 stopIf(Phase.MOVING_TO_ONPREM, liveContainer.get());
-                phase(Phase.CLOUD);
                 throw new IllegalStateException("CNAME 변경에 실패했습니다: " + e.getMessage(), e);
             }
             String url = "https://" + host + OnPremPipeline.probePath(current.canaryPath(), current.healthPath());
             if (!publicOk.test(url)) {
                 try {
+                    if (cloudStopped) {
+                        restartCloud(app);
+                        cloudStopped = false;
+                    }
                     moveDns(host, cloudOrigin);
                     stopIf(Phase.MOVING_TO_ONPREM, liveContainer.get());
-                    phase(Phase.CLOUD);
                 } catch (RuntimeException e) {
                     keepMoving = true;
                     throw new IllegalStateException("공개 확인에 실패했고 CNAME 을 되돌리지 못했습니다: " + e.getMessage(), e);
                 }
                 throw new IllegalStateException("공개 주소 확인에 실패했습니다");
             }
+            int warm = burstSettings.warmReplicas();
+            if (migrate) {
+                // 클라우드 Pod 는 RDS 를 본다. 버스팅으로 넘기면 데이터가 갈라지므로 내 PC DB 를 보는 대기 배포로 바꾼다
+                DeployJob moved = target.withDatabase("local", null, false);
+                job = moved;
+                cloudJobId = null;
+                phase(Phase.ONPREM);
+                event("database: 내 PC (RDS 는 그대로 남음)");
+                later.after(DRAIN_MILLIS, () -> {
+                    if (phase != Phase.ONPREM) {
+                        return;
+                    }
+                    restoreStandby(moved);
+                });
+                event("home: onprem");
+                return;
+            }
             phase(Phase.ONPREM);
             if (burst != null) {
                 burst.resume();
             }
-            int warm = burstSettings.warmReplicas();
             later.after(DRAIN_MILLIS, () -> {
                 if (phase != Phase.ONPREM || client == null) {
                     return;
@@ -444,11 +579,30 @@ public final class HomeCutover implements DeployedApp {
             });
             event("home: onprem");
         } catch (RuntimeException e) {
+            if (migrate) {
+                // 로컬 배포가 잡을 바꿨을 수 있다. 원본(RDS) 기준 잡으로 되돌린다
+                job = current;
+            }
+            if (cloudStopped && !keepMoving) {
+                try {
+                    restartCloud(app);
+                } catch (RuntimeException restart) {
+                    event("cloud restart failed: " + restart.getMessage());
+                }
+            }
             if (!keepMoving && phase == Phase.MOVING_TO_ONPREM) {
                 phase(Phase.CLOUD);
             }
             event(e.getMessage());
             throw e;
+        }
+    }
+
+    /** 쓰기를 멈추려고 0 으로 내린 클라우드를 다시 띄운다. 닿을 때까지 기다린다 */
+    private void restartCloud(String app) {
+        client.scale(app, Math.max(burstSettings.replicas(), burstSettings.warmReplicas()));
+        if (!await(this::cloudReady, SCALE_TIMEOUT_MILLIS)) {
+            throw new IllegalStateException("클라우드 Pod 를 다시 띄우지 못했습니다");
         }
     }
 
@@ -623,7 +777,11 @@ public final class HomeCutover implements DeployedApp {
         }
     }
 
+    /**
+     * @param databaseMode    지금 앱 DB 위치 (local, cloud, external). DB 가 없으면 ""
+     * @param databaseMovable 거점 전환과 같이 DB 를 옮길 수 있다
+     */
     public record Status(String phase, String appName, String publicHost, String cname, boolean already,
-                         List<String> events) {
+                         List<String> events, String databaseMode, boolean databaseMovable) {
     }
 }
