@@ -39,6 +39,51 @@ class CloudBurstTest {
     }
 
     @Test
+    void 재시작_뒤_다시_붙인_앱은_남은_대기_배포로_넘김을_다시_켠다() {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+
+        burst.recover("blog");
+        burst.tick(idle(), at(1));
+
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.WARMING);
+        assertThat(burst.status().appName()).isEqualTo("blog");
+        assertThat(client.scales).containsExactly(1);
+        assertThat(client.standbys).isEmpty();
+
+        client.ready = 1;
+        burst.tick(idle(), at(2));
+
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.IDLE);
+        assertThat(burst.status().warm()).isTrue();
+        assertThat(proxy.overflowing()).isTrue();
+    }
+
+    @Test
+    void 재시작_뒤_클라우드_대기_배포가_없으면_다음_배포를_기다린다() {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+        client.missing = true;
+
+        burst.recover("blog");
+        burst.tick(idle(), at(1));
+        burst.tick(idle(), at(2));
+
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
+        assertThat(client.scales).isEmpty();
+        assertThat(proxy.overflowing()).isFalse();
+    }
+
+    @Test
+    void 재시작_뒤라도_버스팅이_꺼져_있으면_건드리지_않는다() {
+        CloudBurst burst = new CloudBurst(settings(1, false), null, proxy, client, (ingress, host) -> podReachable);
+
+        burst.recover("blog");
+        burst.tick(idle(), at(1));
+
+        assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
+        assertThat(client.scales).isEmpty();
+    }
+
+    @Test
     void Ingress_가_아직_Pod_로_못_보내면_넘김을_켜지_않는다() throws Exception {
         CloudBurst burst = deployed(1);
         client.ready = 1;
@@ -366,6 +411,8 @@ class CloudBurstTest {
     private static final class FakeClient extends BurstClient {
         final List<Integer> scales = new ArrayList<>();
         volatile int ready;
+        /** 클라우드에 대기 배포가 없다 (builder 가 404) */
+        volatile boolean missing;
 
         FakeClient() {
             super(settings(1), new ObjectMapper());
@@ -387,6 +434,9 @@ class CloudBurstTest {
 
         @Override
         public AppState app(String appName) {
+            if (missing) {
+                throw new IllegalStateException("GET /api/burst/apps/" + appName + " -> 404");
+            }
             return new AppState(scales.isEmpty() ? 0 : scales.get(scales.size() - 1), ready);
         }
 

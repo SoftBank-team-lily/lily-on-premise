@@ -27,6 +27,7 @@ class SlotRecoveryTest {
                 """, Set.of(18080));
 
         assertThat(recovery.recover()).contains("burst-demo-blue");
+        assertThat(SlotRecovery.appOf("burst-demo-blue")).isEqualTo("burst-demo");
         assertThat(traffic.port).isEqualTo(18080);
         assertThat(slots.active("burst-demo")).contains(Slot.BLUE);
         assertThat(resumed).singleElement()
