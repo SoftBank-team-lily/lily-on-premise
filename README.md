@@ -722,6 +722,7 @@ SPRING_PROFILES_ACTIVE=local
 - 배스천 계정은 lily-db-provisioner 의 `deploy/k3s/cluster/db-tunnel-user.sh` 로 만든다 (셸 없음, RDS:5432 포워딩만)
 - 커넥션: 온프레미스 슬롯 최대 2 + 클라우드 `BURST_REPLICAS`, 각 풀 3 → 20 이하
 - 터널은 처음 연 뒤 5초마다 로컬 포트를 보고, 닫혀 있으면 다시 연다 (PC 가 잠들었다 깨거나 네트워크가 끊겨 ssh 가 끝난 경우). `ServerAliveInterval=10` 이라 끊긴 연결은 30초 안에 끝난다
+- 검증 (2026-10-02): 에이전트 안의 `ssh -L` 프로세스를 강제로 끊으면 약 1.2초 뒤 터널이 다시 열리고 앱 API 200
 - 에이전트가 다시 뜨면 다시 붙인 앱이 이 터널을 쓸 때 터널을 연다 (`SlotRecovery`)
 
 | 환경변수 | 기본값 | 설명 |
