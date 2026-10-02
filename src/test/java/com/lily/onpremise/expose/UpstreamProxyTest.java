@@ -37,6 +37,40 @@ class UpstreamProxyTest {
         }
     }
 
+    @Test
+    void 클라우드_비율만큼_로컬_여유와_상관없이_넘긴다() throws Exception {
+        UpstreamProxy proxy = new UpstreamProxy(0);
+        proxy.start();
+        HttpServer local = listen("local");
+        HttpServer cloud = listen("cloud");
+        try {
+            proxy.switchTo(local.getAddress().getPort());
+            proxy.cloudShare(100);
+            // 넘김 대상이 없으면 비율이 있어도 로컬이다
+            assertThat(get(proxy.port()).body()).isEqualTo("local");
+
+            proxy.overflowTo(cloud.getAddress());
+            assertThat(get(proxy.port()).body()).isEqualTo("cloud");
+
+            proxy.cloudShare(0);
+            assertThat(get(proxy.port()).body()).isEqualTo("local");
+
+            proxy.cloudShare(50);
+            int toCloud = 0;
+            for (int i = 0; i < 200; i++) {
+                if ("cloud".equals(get(proxy.port()).body())) {
+                    toCloud++;
+                }
+            }
+            assertThat(toCloud).isBetween(60, 140);
+            assertThat(proxy.pressure().overflowedTotal()).isEqualTo(1 + toCloud);
+        } finally {
+            proxy.close();
+            local.stop(0);
+            cloud.stop(0);
+        }
+    }
+
     private HttpResponse<String> get(int port) throws Exception {
         return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/")).build(),
                 HttpResponse.BodyHandlers.ofString());

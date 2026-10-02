@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiPredicate;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -43,6 +44,10 @@ import java.util.function.Consumer;
  *
  * 대기 Pod 를 두는 이유: 0 에서 띄우면 Spring 앱 기준 Ingress 가 Pod 까지 닿는 데 20~40초 걸리고,
  * 그동안 넘기지 못해 로컬에 요청이 쌓인다.
+ *
+ * <p>켜고 끄기와 클라우드 비율은 화면에서 정한다 ({@link #configure}). 비율은 대기 Pod 가 닿은 뒤부터
+ * 요청마다 그 확률로 클라우드에 보내고, 넘침(로컬 한도 초과)은 비율과 상관없이 계속 넘긴다.
+ * 플랫폼 연결이면 builder 호출과 Ingress 주소를 컨트롤 플레인이 준다 ({@link #platform}).
  */
 @Component
 public class CloudBurst implements BurstGate {
@@ -56,7 +61,6 @@ public class CloudBurst implements BurstGate {
     private final AgentProperties.Burst settings;
     private final AgentProperties.Cloudflare cloudflare;
     private final UpstreamProxy proxy;
-    private final BurstClient client;
     private final BiPredicate<InetSocketAddress, String> reachesPod;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "lily-burst");
@@ -65,7 +69,20 @@ public class CloudBurst implements BurstGate {
     });
     private final Deque<String> events = new ArrayDeque<>();
 
+    private volatile BurstClient client;
+    private volatile String ingressHost;
+    private volatile int ingressPort;
+    /** 플랫폼 존. 환경변수에 존이 없을 때 공개 호스트를 정한다 */
+    private volatile String platformZone = "";
+
     private volatile Phase phase = Phase.OFF;
+    /** 화면에서 켠 상태. 환경변수 BURST_ENABLED 가 처음 값이다 */
+    private volatile boolean enabled;
+    private volatile int cloudPercent;
+    /** 마지막으로 성공한 온프레미스 배포. 켜면 이 잡으로 대기 배포한다 */
+    private volatile DeployJob lastJob;
+    /** 끄거나 다시 배포하면 늘린다. 이전 대기 배포가 늦게 끝나도 반영하지 않는다 */
+    private final AtomicInteger generation = new AtomicInteger();
     private volatile String appName;
     private volatile String host;
     /** 대기 Pod 가 Ingress 로 닿아서 넘김이 켜져 있다 */
@@ -81,7 +98,7 @@ public class CloudBurst implements BurstGate {
     @Autowired
     public CloudBurst(AgentProperties properties, LocalExposure exposure, ObjectMapper json) {
         this(properties.burst(), properties.cloudflare(), exposure.proxy(),
-                properties.burst().enabled() ? new BurstClient(properties.burst(), json) : null,
+                properties.burst().builderUrl().isBlank() ? null : new BurstClient(properties.burst(), json),
                 IngressProbe::reachesPod);
     }
 
@@ -92,23 +109,87 @@ public class CloudBurst implements BurstGate {
         this.proxy = proxy;
         this.client = client;
         this.reachesPod = reachesPod;
+        this.ingressHost = settings.ingressHost();
+        this.ingressPort = settings.ingressPort();
+        this.enabled = settings.enabled();
     }
 
     @PostConstruct
     void start() {
-        if (!settings.enabled()) {
-            return;
-        }
         proxy.localLimit(settings.localLimit());
         scheduler.scheduleWithFixedDelay(this::safeTick, 1, 1, TimeUnit.SECONDS);
-        event("enabled: localLimit=" + settings.localLimit() + " replicas=" + settings.replicas()
-                + " warm=" + settings.warmReplicas()
-                + " target=" + settings.ingressHost() + ":" + settings.ingressPort());
+        if (enabled) {
+            event("enabled: localLimit=" + settings.localLimit() + " replicas=" + settings.replicas()
+                    + " warm=" + settings.warmReplicas() + " target=" + ingressHost + ":" + ingressPort);
+        }
     }
 
     @PreDestroy
     void stop() {
         scheduler.shutdownNow();
+    }
+
+    /** 플랫폼 연결: builder 호출은 컨트롤 플레인 소켓으로, 넘길 곳은 컨트롤 플레인이 준 Ingress 다 */
+    public void platform(BurstClient relay, String ingressHost, int ingressPort, String zoneName) {
+        this.client = relay;
+        this.ingressHost = ingressHost == null ? "" : ingressHost;
+        this.ingressPort = ingressPort;
+        this.platformZone = zoneName == null ? "" : zoneName.trim().toLowerCase();
+        event("platform: target=" + this.ingressHost + ":" + ingressPort);
+    }
+
+    /** builder 와 넘길 곳이 있어서 켤 수 있다 */
+    public boolean available() {
+        return client != null && ingressHost != null && !ingressHost.isBlank();
+    }
+
+    /**
+     * 화면에서 켜고 끄고 클라우드 비율을 정한다. 소켓 수신 스레드에서 불리므로 일은 스케줄러에서 한다.
+     * 끄면 넘김을 멈추고 클라우드를 0 으로 내린다. 켜면 마지막 배포로 대기 배포를 시작한다 (없으면 다음 배포부터).
+     *
+     * @param app     이 앱에 대한 설정일 때만 받는다. 비우면 지금 앱
+     * @param percent 0~100. 범위를 벗어나면 잘라 낸다
+     */
+    public void configure(String app, boolean on, int percent) {
+        scheduler.execute(() -> apply(app, on, Math.max(0, Math.min(100, percent))));
+    }
+
+    void apply(String app, boolean on, int percent) {
+        DeployJob job = lastJob;
+        String current = job != null ? job.appName() : appName;
+        if (app != null && !app.isBlank() && current != null && !app.equals(current)) {
+            event("skip config: app " + app + " is not " + current);
+            return;
+        }
+        if (percent != cloudPercent) {
+            cloudPercent = percent;
+            proxy.cloudShare(percent);
+            event("share: cloud " + percent + "%");
+        }
+        if (on == enabled) {
+            return;
+        }
+        enabled = on;
+        if (!on) {
+            generation.incrementAndGet();
+            proxy.clearOverflow();
+            warm = false;
+            Phase was = phase;
+            phase = Phase.OFF;
+            if (was != Phase.OFF && appName != null && client != null && scaleGate.getAsBoolean()) {
+                try {
+                    client.scale(appName, 0);
+                } catch (RuntimeException e) {
+                    event("off: scale down failed: " + e.getMessage());
+                }
+            }
+            event("off");
+            return;
+        }
+        event("on");
+        if (job != null) {
+            onDeployed(job);
+        }
     }
 
     @Override
@@ -130,6 +211,17 @@ public class CloudBurst implements BurstGate {
         event("park: home is cloud");
     }
 
+    /** 거점 전환이 클라우드 Pod 를 대기 수로 되돌린다. 닿는지 확인하고 넘김을 다시 켠다 */
+    @Override
+    public void resume() {
+        if (!enabled || appName == null || client == null || phase != Phase.OFF) {
+            return;
+        }
+        scalingSince = System.currentTimeMillis();
+        phase = Phase.WARMING;
+        event("resume: home is onprem");
+    }
+
     private volatile DatabaseModes onPremDatabase;
 
     /** DB 위치가 local·external 인 앱의 클라우드 접속 정보를 여기서 받는다 */
@@ -138,9 +230,14 @@ public class CloudBurst implements BurstGate {
         this.onPremDatabase = databases;
     }
 
-    /** 온프레미스 배포가 성공하면 클라우드에 같은 앱을 대기 배포한다 */
+    /** 온프레미스 배포가 성공하면 클라우드에 같은 앱을 대기 배포한다 (켜져 있을 때) */
     public void onDeployed(DeployJob job) {
-        if (!settings.enabled()) {
+        lastJob = job;
+        if (!enabled) {
+            return;
+        }
+        if (!available()) {
+            event("skip: builder 또는 클라우드 Ingress 가 없습니다 (BURST_* 또는 플랫폼 연결 필요)");
             return;
         }
         String publicHost = publicHost(job.appName());
@@ -148,69 +245,97 @@ public class CloudBurst implements BurstGate {
             event("skip: publicHost 를 정할 수 없습니다 (BURST_PUBLIC_HOST 또는 Cloudflare zone 필요)");
             return;
         }
+        int run = generation.incrementAndGet();
         proxy.clearOverflow();
         this.warm = false;
         this.appName = job.appName();
         this.host = publicHost;
         this.phase = Phase.STANDBY;
-        scheduler.execute(() -> prepareStandby(job, publicHost));
+        // 대기 배포는 길게는 15분 걸린다. 그동안 틱과 설정 변경이 막히지 않게 스케줄러 밖에서 기다린다
+        Thread.ofVirtual().name("lily-burst-standby").start(() -> prepareStandby(job, publicHost, run));
     }
 
     public Status status() {
         UpstreamProxy.Pressure pressure = proxy.pressure();
         synchronized (events) {
-            return new Status(settings.enabled(), phase, appName, host, warm, pressure, List.copyOf(events));
+            return new Status(enabled, available(), cloudPercent, phase, appName, host, warm, pressure,
+                    List.copyOf(events));
         }
     }
 
-    private void prepareStandby(DeployJob job, String publicHost) {
-        try {
-            String database = job.database() != null ? job.database() : settings.database();
-            Map<String, String> databaseEnv = null;
-            if (job.database() != null && !"cloud".equals(job.databaseModeOrDefault())) {
-                // 이 PC 의 DB 를 쓴다. 클라우드 Pod 는 역방향 터널로 같은 DB 에 붙는다
-                Optional<Map<String, String>> env = onPremDatabase == null
-                        ? Optional.empty() : onPremDatabase.cloudEnv(job.appName());
-                if (env.isEmpty()) {
-                    phase = Phase.OFF;
-                    event("skip: 클라우드에서 이 PC 의 DB 에 닿을 역방향 터널이 없습니다 (플랫폼 연결 필요)");
-                    return;
-                }
-                database = null;
-                databaseEnv = env.get();
+    @Override
+    public String standby(DeployJob job, String publicHost) {
+        String database = job.database() != null ? job.database() : settings.database();
+        Map<String, String> databaseEnv = null;
+        if (job.database() != null && !"cloud".equals(job.databaseModeOrDefault())) {
+            // 이 PC 의 DB 를 쓴다. 클라우드 Pod 는 역방향 터널로 같은 DB 에 붙는다
+            Optional<Map<String, String>> env = onPremDatabase == null
+                    ? Optional.empty() : onPremDatabase.cloudEnv(job.appName());
+            if (env.isEmpty()) {
+                throw new IllegalStateException("클라우드에서 이 PC 의 DB 에 닿을 역방향 터널이 없습니다 (플랫폼 연결 필요)");
             }
-            String id = client.standby(job, publicHost, database, databaseEnv);
+            database = null;
+            databaseEnv = env.get();
+        }
+        BurstClient current = client;
+        if (current == null) {
+            throw new IllegalStateException("builder 연결이 없습니다");
+        }
+        return current.standby(job, publicHost, database, databaseEnv);
+    }
+
+    private void prepareStandby(DeployJob job, String publicHost, int run) {
+        try {
+            String id = standby(job, publicHost);
             event("standby: cloud build " + id + " host=" + publicHost);
             long deadline = System.currentTimeMillis() + 15 * 60_000L;
             while (System.currentTimeMillis() < deadline) {
+                if (run != generation.get()) {
+                    event("standby superseded: " + id);
+                    return;
+                }
                 BurstClient.BuildState state = client.build(id);
                 if ("SUCCEEDED".equals(state.status())) {
                     Consumer<DeployJob> listener = standbyListener;
                     if (listener != null) {
                         listener.accept(job);
                     }
-                    standbyReady(System.currentTimeMillis());
+                    scheduler.execute(() -> {
+                        if (run == generation.get()) {
+                            standbyReady(System.currentTimeMillis());
+                        }
+                    });
                     return;
                 }
                 if ("FAILED".equals(state.status())) {
-                    phase = Phase.OFF;
-                    event("standby failed: " + state.lastLog());
+                    off(run, "standby failed: " + state.lastLog());
                     return;
                 }
                 Thread.sleep(5_000);
             }
-            phase = Phase.OFF;
-            event("standby timeout");
+            off(run, "standby timeout");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (RuntimeException e) {
-            phase = Phase.OFF;
-            event("standby error: " + e.getMessage());
+            off(run, "standby error: " + e.getMessage());
         }
+    }
+
+    private void off(int run, String line) {
+        if (run == generation.get()) {
+            phase = Phase.OFF;
+        }
+        event(line);
     }
 
     /** 대기 배포가 끝났다 (builder 가 레플리카 0 으로 내려 둔 상태). 대기 Pod 를 띄운다 */
     void standbyReady(long now) {
+        if (!scaleGate.getAsBoolean()) {
+            // 거점이 클라우드다. 공개 주소가 쓰는 레플리카를 대기 수로 내리지 않는다
+            phase = Phase.OFF;
+            event("standby ready: home is cloud, replicas unchanged");
+            return;
+        }
         if (settings.warmReplicas() < 1) {
             phase = Phase.IDLE;
             event("standby ready: cloud replicas 0");
@@ -244,7 +369,7 @@ public class CloudBurst implements BurstGate {
                     proxy.overflowTo(ingress());
                     warm = true;
                     phase = Phase.IDLE;
-                    event("warm: cloud ready, overflow on");
+                    event("warm: cloud ready, overflow on" + (cloudPercent > 0 ? ", share " + cloudPercent + "%" : ""));
                 } else if (now - scalingSince > SCALE_TIMEOUT_MILLIS) {
                     // 대기 Pod 없이도 동작은 한다. 넘길 때 띄우는 방식으로 돌아간다
                     client.scale(appName, 0);
@@ -293,7 +418,9 @@ public class CloudBurst implements BurstGate {
                 }
             }
             case OVERFLOWING -> {
-                boolean busy = delta > 0 || p.remoteActive() > 0 || p.localActive() >= p.localLimit();
+                // 비율로 나누는 중이면 클라우드에 늘 요청이 있다. 그때는 로컬 과부하만 본다
+                boolean busy = delta > 0 || p.localActive() >= p.localLimit()
+                        || (cloudPercent == 0 && p.remoteActive() > 0);
                 if (busy) {
                     quietSince = 0;
                     return;
@@ -325,7 +452,7 @@ public class CloudBurst implements BurstGate {
     }
 
     private InetSocketAddress ingress() {
-        return new InetSocketAddress(settings.ingressHost(), settings.ingressPort());
+        return new InetSocketAddress(ingressHost, ingressPort);
     }
 
     private String publicHost(String app) {
@@ -334,6 +461,9 @@ public class CloudBurst implements BurstGate {
             return pattern.replace("{app}", app).toLowerCase();
         }
         String zone = cloudflare == null ? "" : cloudflare.zoneNameNormalized();
+        if (zone.isBlank()) {
+            zone = platformZone;
+        }
         return zone.isBlank() ? null : app + "." + zone;
     }
 
@@ -347,7 +477,12 @@ public class CloudBurst implements BurstGate {
         }
     }
 
-    public record Status(boolean enabled, Phase phase, String appName, String publicHost, boolean warm,
-                         UpstreamProxy.Pressure pressure, List<String> events) {
+    /**
+     * @param enabled      화면(또는 BURST_ENABLED)에서 켰다
+     * @param available    builder 와 클라우드 Ingress 가 있어 켤 수 있다
+     * @param cloudPercent 대기 Pod 가 닿은 뒤 클라우드로 보내는 요청 비율
+     */
+    public record Status(boolean enabled, boolean available, int cloudPercent, Phase phase, String appName,
+                         String publicHost, boolean warm, UpstreamProxy.Pressure pressure, List<String> events) {
     }
 }

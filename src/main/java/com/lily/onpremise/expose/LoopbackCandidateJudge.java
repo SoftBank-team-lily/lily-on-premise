@@ -14,6 +14,10 @@ import java.util.Optional;
  * 후보와 지금 트래픽을 받는 슬롯에 루프백으로 같은 경로를 보낸다.
  * 공개 프록시의 upstream 은 바꾸지 않는다. 5xx 와 연결 실패만 에러다.
  * 기준은 클라우드 블루그린 판정과 같다. 30초, 최소 20응답, 에러율 5%, p95 1초.
+ *
+ * <p>후보가 처음 HTTP 로 응답하기 전의 연결 실패는 기동 중으로 보고 세지 않는다. 헬스가 tcp 면 Docker 포트 프록시가
+ * 앱보다 먼저 연결을 받아 헬스가 바로 통과하고, 앱이 뜨는 몇 초 동안 연결이 끊긴다. 끝까지 응답하지 않으면
+ * 응답 수가 모자라 거절한다.
  */
 public final class LoopbackCandidateJudge implements CandidateJudge {
 
@@ -57,9 +61,14 @@ public final class LoopbackCandidateJudge implements CandidateJudge {
         List<Sample> newer = new ArrayList<>();
         List<Sample> older = new ArrayList<>();
         long deadline = System.nanoTime() + duration.toNanos();
+        boolean answered = false;
         while (System.nanoTime() < deadline) {
-            newer.add(sample(candidatePort, httpPath));
-            older.add(sample(activePort, httpPath));
+            Sample candidate = sample(candidatePort, httpPath);
+            answered = answered || candidate.answered();
+            if (answered) {
+                newer.add(candidate);
+                older.add(sample(activePort, httpPath));
+            }
             if (newer.size() >= EARLY_ABORT_SAMPLES) {
                 Stats early = Stats.of(newer);
                 if (early.errorRate() >= EARLY_ABORT_ERROR_RATE) {
@@ -89,13 +98,13 @@ public final class LoopbackCandidateJudge implements CandidateJudge {
                     .build();
             HttpResponse<Void> response = http.send(request, HttpResponse.BodyHandlers.discarding());
             long millis = (System.nanoTime() - started) / 1_000_000;
-            return new Sample(millis, response.statusCode() >= 500);
+            return new Sample(millis, response.statusCode() >= 500, true);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("judge interrupted");
         } catch (Exception e) {
             long millis = (System.nanoTime() - started) / 1_000_000;
-            return new Sample(millis, true);
+            return new Sample(millis, true, false);
         }
     }
 
@@ -122,7 +131,8 @@ public final class LoopbackCandidateJudge implements CandidateJudge {
         return String.format("%.1f%%", rate * 100);
     }
 
-    record Sample(long millis, boolean failed) {
+    /** @param answered HTTP 응답을 받았다 (5xx 포함). 연결 실패·시간 초과면 거짓 */
+    record Sample(long millis, boolean failed, boolean answered) {
     }
 
     record Stats(int total, double errorRate, long p95) {

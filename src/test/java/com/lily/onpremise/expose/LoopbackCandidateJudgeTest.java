@@ -45,6 +45,47 @@ class LoopbackCandidateJudgeTest {
         }
     }
 
+    @Test
+    void 후보가_뜨기_전의_연결_실패는_세지_않는다() throws Exception {
+        // 포트는 열려 있지만 아직 응답하지 않는다 (Docker 포트 프록시가 앱보다 먼저 연결을 받는 상태)
+        HttpServer candidate = server(200);
+        HttpServer active = server(200);
+        active.start();
+        Thread late = Thread.ofVirtual().start(() -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            candidate.start();
+        });
+        try {
+            LoopbackCandidateJudge judge = new LoopbackCandidateJudge(
+                    HttpClient.newHttpClient(), Duration.ofMillis(2000), 20, 300, 2, 0.05, 1000, 2.0, 100);
+            assertThat(judge.reject(candidate.getAddress().getPort(), active.getAddress().getPort(), "/health"))
+                    .isEmpty();
+        } finally {
+            late.join();
+            candidate.stop(0);
+            active.stop(0);
+        }
+    }
+
+    @Test
+    void 후보가_끝까지_응답하지_않으면_거절한다() throws Exception {
+        HttpServer probe = server(200);
+        int port = probe.getAddress().getPort();
+        probe.stop(0);
+        HttpServer active = server(200);
+        active.start();
+        try {
+            assertThat(judge().reject(port, active.getAddress().getPort(), "/health").orElseThrow())
+                    .contains("too few responses");
+        } finally {
+            active.stop(0);
+        }
+    }
+
     private static LoopbackCandidateJudge judge() {
         return new LoopbackCandidateJudge(
                 HttpClient.newHttpClient(), Duration.ofMillis(400), 1, 500,

@@ -2,7 +2,10 @@ package com.lily.onpremise.session;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lily.onpremise.AgentIdentity;
+import com.lily.onpremise.burst.CloudBurst;
 import com.lily.onpremise.config.AgentProperties;
+import com.lily.onpremise.cutover.HomeCutover;
+import com.lily.onpremise.expose.UpstreamProxy;
 import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobMessages;
@@ -35,11 +38,17 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * 온프레미스 머신은 인바운드 포트를 열지 않는다.
  * 에이전트가 컨트롤 플레인으로 한 소켓을 유지하고, 잡과 상태와 결과를 그 소켓으로만 주고받는다.
+ *
+ * <pre>
+ * 컨트롤 플레인 → {"type":"burst","app":"..","enabled":true,"cloudPercent":30}   버스팅 켜기·끄기와 클라우드 비율
+ * 에이전트     → {"type":"burst-state", ...}  {@value #STATE_SECONDS}초마다 버스팅·거점 상태
+ * </pre>
  */
 @Component
 public class WebSocketControlSession implements ControlSession {
 
     private static final Logger log = LoggerFactory.getLogger(WebSocketControlSession.class);
+    static final int STATE_SECONDS = 3;
 
     private final ObjectProvider<JobSink> jobs;
     private final AgentProperties properties;
@@ -48,6 +57,8 @@ public class WebSocketControlSession implements ControlSession {
     private final ObjectProvider<DatabaseAccess> databases;
     private final PlatformChannel channel;
     private final ObjectProvider<PlatformLink> platform;
+    private final ObjectProvider<CloudBurst> burst;
+    private final ObjectProvider<HomeCutover> cutover;
     private final ObjectMapper mapper = new ObjectMapper();
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean stopping = new AtomicBoolean();
@@ -61,8 +72,12 @@ public class WebSocketControlSession implements ControlSession {
             TrafficSwitch traffic,
             ObjectProvider<DatabaseAccess> databases,
             PlatformChannel channel,
-            ObjectProvider<PlatformLink> platform) {
+            ObjectProvider<PlatformLink> platform,
+            ObjectProvider<CloudBurst> burst,
+            ObjectProvider<HomeCutover> cutover) {
         this.jobs = jobs;
+        this.burst = burst;
+        this.cutover = cutover;
         this.channel = channel;
         this.platform = platform;
         this.properties = properties;
@@ -147,6 +162,49 @@ public class WebSocketControlSession implements ControlSession {
         }
     }
 
+    /** 화면이 보는 버스팅·거점 상태. 앱이 없으면 app 이 비어 있다 */
+    Map<String, Object> state() {
+        CloudBurst.Status b = burst.getObject().status();
+        HomeCutover homes = cutover.getObject();
+        HomeCutover.Status h = homes.status();
+        UpstreamProxy.Pressure p = b.pressure();
+        Map<String, Object> state = new LinkedHashMap<>();
+        state.put("type", "burst-state");
+        state.put("agentId", identity.id());
+        state.put("app", b.appName() != null ? b.appName() : h.appName() == null ? "" : h.appName());
+        state.put("available", b.available());
+        state.put("enabled", b.enabled());
+        state.put("cloudPercent", b.cloudPercent());
+        state.put("phase", b.phase().name());
+        state.put("warm", b.warm());
+        state.put("localActive", p.localActive());
+        state.put("remoteActive", p.remoteActive());
+        state.put("localLimit", p.localLimit());
+        state.put("overflowedTotal", p.overflowedTotal());
+        state.put("fallbackTotal", p.fallbackTotal());
+        state.put("event", b.events().isEmpty() ? "" : b.events().get(0));
+        state.put("home", h.phase());
+        state.put("movable", homes.movable());
+        state.put("homeEvent", h.events().isEmpty() ? "" : h.events().get(0));
+        return state;
+    }
+
+    private void sendState(WebSocketSession session) {
+        while (session.isOpen() && !stopping.get()) {
+            try {
+                session.sendMessage(new TextMessage(mapper.writeValueAsString(state())));
+            } catch (IOException | RuntimeException e) {
+                log.debug("burst state send failed: {}", e.getMessage());
+            }
+            try {
+                Thread.sleep(STATE_SECONDS * 1000L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
     private Map<String, String> status(JobRecord record) {
         return Map.of(
                 "type", "status",
@@ -180,8 +238,11 @@ public class WebSocketControlSession implements ControlSession {
             hello.put("version", "0.1.0");
             hello.put("database", databases.getObject().ready());
             hello.putAll(platform.getObject().hello());
+            // 이 에이전트가 받는 메시지. 없으면 컨트롤 플레인은 버스팅 설정을 보내지 않는다
+            hello.put("features", java.util.List.of("burst", "home"));
             session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
+            Thread.ofVirtual().name("lily-burst-state").start(() -> sendState(session));
         }
 
         @Override
@@ -194,6 +255,11 @@ public class WebSocketControlSession implements ControlSession {
                     return;
                 }
                 if (node.has("rid") && channel.complete(node)) {
+                    return;
+                }
+                if ("burst".equals(type)) {
+                    burst.getObject().configure(node.path("app").asText(""), node.path("enabled").asBoolean(false),
+                            node.path("cloudPercent").asInt(0));
                     return;
                 }
             } catch (IOException | RuntimeException e) {

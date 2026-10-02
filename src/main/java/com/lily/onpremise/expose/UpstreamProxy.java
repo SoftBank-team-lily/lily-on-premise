@@ -15,6 +15,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -26,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>블루/그린 전환은 다음 요청부터 새 포트로 간다. 처리 중인 요청은 끝까지 기존 포트에서 처리한다</li>
  *   <li>클라우드 버스팅: 로컬에서 처리 중인 요청이 {@link #localLimit} 이면, 넘김 대상({@link #overflowTo})이
  *       켜져 있을 때 그 요청을 클라우드 Ingress 로 보낸다. 헤더는 그대로 넘기므로 Host 는 공개 주소다</li>
+ *   <li>클라우드 비율({@link #cloudShare}): 넘김 대상이 켜져 있으면 로컬 여유와 상관없이 요청마다 그 확률로 클라우드에 보낸다</li>
  * </ul>
  *
  * 앞단(cloudflared)은 keep-alive 로 연결 몇 개에 요청을 몰아 보내므로, 연결 단위로 나누면 분배를 정할 수 없다.
@@ -50,6 +52,8 @@ public final class UpstreamProxy implements AutoCloseable {
     private volatile boolean open;
     private volatile int localLimit = Integer.MAX_VALUE;
     private volatile InetSocketAddress overflow;
+    /** 넘김 대상이 있을 때 요청마다 클라우드로 보내는 비율 (0~100) */
+    private volatile int cloudPercent;
     /** 로컬 / 클라우드에서 처리 중인 요청 수 */
     private final AtomicInteger localActive = new AtomicInteger();
     private final AtomicInteger remoteActive = new AtomicInteger();
@@ -116,6 +120,18 @@ public final class UpstreamProxy implements AutoCloseable {
 
     public boolean overflowing() {
         return overflow != null;
+    }
+
+    /** 넘김 대상이 켜져 있는 동안 요청마다 이 비율로 클라우드에 보낸다. 넘김(한도 초과)은 따로 계속 동작한다 */
+    public void cloudShare(int percent) {
+        if (percent < 0 || percent > 100) {
+            throw new IllegalArgumentException("cloud percent");
+        }
+        this.cloudPercent = percent;
+    }
+
+    public int cloudShare() {
+        return cloudPercent;
     }
 
     public Pressure pressure() {
@@ -413,10 +429,17 @@ public final class UpstreamProxy implements AutoCloseable {
     }
 
     /**
-     * 로컬 자리를 원자적으로 잡는다. 자리가 없으면 넘김 대상이 켜져 있을 때 클라우드로,
+     * 클라우드 비율에 걸리면 클라우드로 보낸다. 아니면 로컬 자리를 원자적으로 잡는다. 자리가 없으면 넘김 대상이 켜져 있을 때 클라우드로,
      * 꺼져 있으면 한도를 넘더라도 로컬로 보낸다.
      */
     private Slot acquire() {
+        InetSocketAddress shared = overflow;
+        int share = cloudPercent;
+        if (shared != null && share > 0 && (share >= 100 || ThreadLocalRandom.current().nextInt(100) < share)) {
+            remoteActive.incrementAndGet();
+            overflowed.incrementAndGet();
+            return new Slot(shared);
+        }
         int limit = localLimit;
         while (true) {
             int current = localActive.get();
