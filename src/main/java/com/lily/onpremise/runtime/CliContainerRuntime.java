@@ -57,6 +57,12 @@ public final class CliContainerRuntime implements ContainerRuntime {
         command.add(sandbox.cpus());
         command.add("--pids-limit");
         command.add(Integer.toString(sandbox.pids()));
+        command.add("--log-driver");
+        command.add("json-file");
+        command.add("--log-opt");
+        command.add("max-size=1m");
+        command.add("--log-opt");
+        command.add("max-file=2");
         command.add("--cap-drop");
         command.add("ALL");
         command.add("--security-opt");

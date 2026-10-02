@@ -15,6 +15,15 @@ public final class ProcessCommands implements Commands {
 
     @Override
     public void run(List<String> command, Path workDir) {
+        finish(command, workDir);
+    }
+
+    @Override
+    public String output(List<String> command) {
+        return finish(command, null);
+    }
+
+    private String finish(List<String> command, Path workDir) {
         Process process = startProcess(command, workDir);
         try {
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
@@ -22,6 +31,7 @@ public final class ProcessCommands implements Commands {
             if (code != 0) {
                 throw new IllegalStateException(display(command) + " → " + code + " " + scrub(output).trim());
             }
+            return scrub(output);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             process.destroyForcibly();

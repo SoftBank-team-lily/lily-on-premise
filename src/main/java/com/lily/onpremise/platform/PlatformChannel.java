@@ -29,6 +29,15 @@ public class PlatformChannel {
     private final Map<String, CompletableFuture<JsonNode>> pending = new ConcurrentHashMap<>();
     private volatile Consumer<String> sender;
 
+    /** 응답을 기다리지 않는다. 연결이 없으면 예외 */
+    public void send(String json) {
+        Consumer<String> out = sender;
+        if (out == null) {
+            throw new IllegalStateException("컨트롤 플레인에 연결돼 있지 않습니다");
+        }
+        out.accept(json);
+    }
+
     /** 소켓이 열리면 보낼 곳을 넘기고, 닫히면 null 을 넘긴다 */
     public void attach(Consumer<String> sender) {
         this.sender = sender;

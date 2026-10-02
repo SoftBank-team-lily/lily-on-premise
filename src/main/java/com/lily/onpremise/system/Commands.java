@@ -9,6 +9,11 @@ public interface Commands {
 
     void run(List<String> command, Path workDir);
 
+    /** 표준 출력을 돌려준다. 종료 코드가 0 이 아니면 예외 */
+    default String output(List<String> command) {
+        throw new UnsupportedOperationException("output");
+    }
+
     /** 프로세스를 살려 두고 한 줄씩 넘긴다. 에이전트가 끝날 때 같이 끈다. */
     void start(List<String> command, Consumer<String> lines);
 

@@ -53,6 +53,9 @@ lily:
       memory: ${AGENT_SANDBOX_MEMORY:2g}
       cpus: ${AGENT_SANDBOX_CPUS:1}
       pids: ${AGENT_SANDBOX_PIDS:1024}
+    # 로컬 5xx 가 연속이면 슬롯 로그로 수정 PR 사건을 올린다. false 면 횟수만 세고 로그는 읽지 않는다
+    remediate:
+      enabled: ${AGENT_REMEDIATE_ENABLED:false}
     # 클라우드 RDS 연동: 배포 요청에 database 가 있으면 SSH 터널로 같은 DB 에 붙인다 (계정은 lily-builder 를 거쳐 받는다)
     database:
       ssh-host: ${DB_TUNNEL_SSH_HOST:}

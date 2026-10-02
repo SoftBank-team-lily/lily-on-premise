@@ -67,6 +67,8 @@ public final class UpstreamProxy implements AutoCloseable {
     private final AtomicLong fallback = new AtomicLong();
     /** 내 PC 가 처리한 요청의 시간 (최근 5분). 화면의 HOME p95 */
     private final LatencyWindow localLatency = new LatencyWindow(5 * 60_000L, 2048);
+    /** 로컬 슬롯이 돌려준 최근 1분. 프록시 자체 503 과 클라우드로 넘긴 요청은 넣지 않는다 */
+    private final TrafficWindow localTraffic = new TrafficWindow();
     private Thread acceptThread;
 
     public UpstreamProxy(int requestedPort) {
@@ -151,6 +153,11 @@ public final class UpstreamProxy implements AutoCloseable {
     /** 최근 5분 동안 내 PC 가 처리한 요청의 p95 (ms). 요청이 없었으면 -1 */
     public long localP95Millis() {
         return localLatency.p95(System.currentTimeMillis());
+    }
+
+    /** 로컬 슬롯 응답의 최근 1분. 프록시가 만든 503 과 클라우드 응답은 빠진다 */
+    public TrafficWindow.Sample localTraffic() {
+        return localTraffic.lastMinute(System.currentTimeMillis());
     }
 
     public Pressure pressure() {
@@ -289,6 +296,9 @@ public final class UpstreamProxy implements AutoCloseable {
                 upstreams.drop(upstream);
                 return false;
             }
+        }
+        if (slot.remote == null) {
+            localTraffic.record(System.currentTimeMillis(), response.status() >= 500);
         }
         response.writeTo(out);
 

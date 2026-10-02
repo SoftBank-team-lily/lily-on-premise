@@ -72,6 +72,31 @@ class UpstreamProxyTest {
     }
 
     @Test
+    void 로컬_앱_응답만_최근_1분에_센다() throws Exception {
+        UpstreamProxy proxy = new UpstreamProxy(0);
+        proxy.start();
+        HttpServer app = listen("no", 500);
+        try {
+            assertThat(get(proxy.port()).statusCode()).isEqualTo(503);
+            proxy.pause(true);
+            proxy.switchTo(app.getAddress().getPort());
+            assertThat(get(proxy.port()).statusCode()).isEqualTo(503);
+            proxy.pause(false);
+
+            assertThat(proxy.localTraffic().requests()).isZero();
+
+            assertThat(get(proxy.port()).statusCode()).isEqualTo(500);
+            TrafficWindow.Sample failed = proxy.localTraffic();
+            assertThat(failed.requests()).isEqualTo(1);
+            assertThat(failed.errors()).isEqualTo(1);
+            assertThat(failed.critical()).isFalse();
+        } finally {
+            proxy.close();
+            app.stop(0);
+        }
+    }
+
+    @Test
     void 점검_중에는_503_과_Retry_After_를_돌려준다() throws Exception {
         UpstreamProxy proxy = new UpstreamProxy(0);
         proxy.start();
@@ -97,11 +122,15 @@ class UpstreamProxyTest {
     }
 
     private static HttpServer listen(String word) throws IOException {
+        return listen(word, 200);
+    }
+
+    private static HttpServer listen(String word, int status) throws IOException {
         HttpServer server = HttpServer.create(
                 new InetSocketAddress(InetAddress.getByAddress(new byte[] {127, 0, 0, 1}), 0), 0);
         server.createContext("/", exchange -> {
             byte[] body = word.getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, body.length);
+            exchange.sendResponseHeaders(status, body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
         });
