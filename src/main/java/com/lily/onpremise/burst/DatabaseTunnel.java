@@ -15,31 +15,46 @@ import java.util.List;
  * 온프레미스 → 클라우드 RDS SSH 포트포워딩.
  * {@code ssh -N -L {bindHost}:{bindPort}:{remoteHost}:{remotePort} {user}@{sshHost}}
  * 배스천 계정은 authorized_keys 에서 RDS 포트로의 포워딩만 허용된다.
+ *
+ * <p>한 번 연 뒤에는 {@link #CHECK_MILLIS} 마다 로컬 포트를 보고, 닫혀 있으면 다시 연다
+ * (PC 가 잠들었다 깨거나 네트워크가 끊겨 ssh 가 끝나면 다음 배포까지 앱 DB 가 끊겨 있었다).
  */
 public class DatabaseTunnel {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseTunnel.class);
+    static final long CHECK_MILLIS = 5_000;
 
     private final AgentProperties.Database settings;
     private final Commands commands;
     private final Path knownHosts;
+    private final long checkMillis;
+    /** ensure 가 한 번 성공한 뒤부터 감시한다 */
+    private volatile boolean wanted;
+    private Thread supervisor;
 
     public DatabaseTunnel(AgentProperties.Database settings, Commands commands, Path workDir) {
+        this(settings, commands, workDir, CHECK_MILLIS);
+    }
+
+    DatabaseTunnel(AgentProperties.Database settings, Commands commands, Path workDir, long checkMillis) {
         this.settings = settings;
         this.commands = commands;
         this.knownHosts = workDir.resolve("known_hosts");
+        this.checkMillis = checkMillis;
     }
 
     /** 터널이 열려 있지 않으면 띄우고, 로컬 포트가 열릴 때까지 기다린다 */
     public synchronized void ensure() {
         if (open()) {
+            watch();
             return;
         }
         String forward = settings.bindHost() + ":" + settings.bindPort() + ":"
                 + settings.remoteHost() + ":" + settings.remotePort();
         commands.start(List.of("ssh", "-N",
                 "-o", "ExitOnForwardFailure=yes",
-                "-o", "ServerAliveInterval=30",
+                // 끊긴 연결을 30초 안에 알아채고 ssh 가 끝나야 감시가 다시 연다 (끝나기 전에는 로컬 포트가 열려 있다)
+                "-o", "ServerAliveInterval=10",
                 "-o", "ServerAliveCountMax=3",
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-o", "UserKnownHostsFile=" + knownHosts,
@@ -52,6 +67,7 @@ public class DatabaseTunnel {
             if (open()) {
                 log.info("db tunnel ready: {}:{} -> {}:{}", settings.bindHost(), settings.bindPort(),
                         settings.remoteHost(), settings.remotePort());
+                watch();
                 return;
             }
             try {
@@ -62,6 +78,32 @@ public class DatabaseTunnel {
             }
         }
         throw new IllegalStateException("DB 터널을 열지 못했습니다: " + settings.bindHost() + ":" + settings.bindPort());
+    }
+
+    private void watch() {
+        wanted = true;
+        if (supervisor == null) {
+            supervisor = Thread.ofVirtual().name("lily-db-tunnel").start(this::supervise);
+        }
+    }
+
+    private void supervise() {
+        while (true) {
+            try {
+                Thread.sleep(checkMillis);
+            } catch (InterruptedException e) {
+                return;
+            }
+            if (!wanted || open()) {
+                continue;
+            }
+            log.warn("db tunnel closed: {}:{}, reopening", settings.bindHost(), settings.bindPort());
+            try {
+                ensure();
+            } catch (RuntimeException e) {
+                log.warn("db tunnel reopen failed: {}", e.getMessage());
+            }
+        }
     }
 
     public String host() {
