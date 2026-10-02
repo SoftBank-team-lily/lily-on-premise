@@ -54,6 +54,7 @@ class CliContainerRuntimeTest {
 
         List<String> command = commands.ran.get(1);
         assertThat(command).containsSequence("-p", "127.0.0.1:18080:8080");
+        assertThat(command).containsSequence("--restart", "unless-stopped");
         assertThat(command).containsSequence("--memory", "2g", "--memory-swap", "2g", "--cpus", "1", "--pids-limit", "1024");
         assertThat(command).containsSequence("--log-driver", "json-file", "--log-opt", "max-size=1m", "--log-opt", "max-file=2");
         assertThat(command).containsSequence("--cap-drop", "ALL", "--security-opt", "no-new-privileges:true");
