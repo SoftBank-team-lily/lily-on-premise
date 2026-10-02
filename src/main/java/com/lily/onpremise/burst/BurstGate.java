@@ -26,4 +26,13 @@ public interface BurstGate {
     /** 거점 전환이 클라우드 대기 배포의 DB 를 바꿨다가 되돌린다. 버스팅이 켜져 있으면 이 잡으로 다시 대기 배포한다 */
     default void standbyAgain(DeployJob job) {
     }
+
+    /** 참이면 거점을 옮기는 중이다. 그동안 화면에서 버스팅을 켜고 끄지 않는다 (대기 배포가 겹친다) */
+    default void holdChanges(BooleanSupplier moving) {
+    }
+
+    /** 버스팅이 클라우드에 대기 배포를 하는 중이다. 그동안 거점을 옮기지 않는다 */
+    default boolean busy() {
+        return false;
+    }
 }

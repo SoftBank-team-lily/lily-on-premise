@@ -352,6 +352,71 @@ class HomeCutoverTest {
         return new AgentProperties.Cloudflare(false, "", "secret", "acct", "zone", "lily.dev");
     }
 
+    @Test
+    void 단계를_차례로_알리고_끝나면_지금_단계를_비운다() {
+        cutover.begin("blog", "cloud");
+        cutover.perform();
+
+        HomeCutover.Status status = cutover.status();
+        assertThat(status.steps()).containsExactly("STANDBY", "SCALE", "DNS", "VERIFY");
+        assertThat(status.step()).isEmpty();
+        assertThat(status.cancellable()).isFalse();
+        assertThat(status.events()).contains("step: STANDBY", "step: SCALE", "step: DNS", "step: VERIFY");
+    }
+
+    @Test
+    void 취소하면_주소를_바꾸지_않고_출발_거점에_남는다() {
+        cutover.begin("blog", "cloud");
+        assertThat(cutover.status().cancellable()).isTrue();
+
+        cutover.cancel("blog");
+        assertThatThrownBy(() -> cutover.perform()).hasMessageContaining("취소");
+
+        assertThat(api.puts).isEmpty();
+        assertThat(cutover.status().phase()).isEqualTo("ONPREM");
+        assertThat(client.standbys).isEmpty();
+    }
+
+    @Test
+    void 주소를_바꾼_뒤에는_취소를_받지_않는다() {
+        List<String> answers = new ArrayList<>();
+        HomeCutover[] holder = new HomeCutover[1];
+        CloudflareHostnameProvisioner dns = new CloudflareHostnameProvisioner(api, cloudflare());
+        dns.openTunnel("ab12");
+        holder[0] = new HomeCutover(
+                properties(ORIGIN), dns, client, burst, job -> true, () -> true,
+                url -> {
+                    try {
+                        holder[0].cancel("blog");
+                    } catch (IllegalArgumentException e) {
+                        answers.add(e.getMessage());
+                    }
+                    return true;
+                },
+                (ingress, host) -> true, () -> "blog-blue", stops::add, later, () -> now[0],
+                millis -> now[0] += 200_000, null);
+        holder[0].note(job("job1", "postgres", null), true);
+
+        holder[0].begin("blog", "cloud");
+        holder[0].perform();
+
+        assertThat(answers).singleElement().asString().contains("이미 바꿔서");
+        assertThat(holder[0].status().phase()).isEqualTo("CLOUD");
+    }
+
+    @Test
+    void 옮기는_중이_아니면_취소를_거절한다() {
+        assertThatThrownBy(() -> cutover.cancel("blog")).hasMessageContaining("옮기는 중이 아니에요");
+    }
+
+    @Test
+    void 버스팅_대기_배포_중에는_옮기지_않는다() {
+        burst.busy = true;
+
+        assertThatThrownBy(() -> cutover.begin("blog", "cloud")).hasMessageContaining("버스팅 대기 배포");
+        assertThat(cutover.status().phase()).isEqualTo("ONPREM");
+    }
+
     private static final class ManualLater implements HomeCutover.Later {
         private Runnable task;
 
@@ -387,6 +452,12 @@ class HomeCutoverTest {
         private java.util.function.BooleanSupplier gate = () -> true;
         private boolean parked;
         private boolean resumed;
+        private boolean busy;
+
+        @Override
+        public boolean busy() {
+            return busy;
+        }
         private final List<String> standbyModes = new ArrayList<>();
         private final List<DeployJob> again = new ArrayList<>();
 

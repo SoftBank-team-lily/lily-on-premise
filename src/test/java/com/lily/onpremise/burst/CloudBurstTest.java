@@ -259,6 +259,29 @@ class CloudBurstTest {
         assertThat(burst.status().phase()).isEqualTo(CloudBurst.Phase.OFF);
     }
 
+    @Test
+    void 거점을_옮기는_중에는_켜고_끄지_않는다() throws Exception {
+        CloudBurst burst = warmed();
+        burst.holdChanges(() -> true);
+
+        burst.apply("blog", false, 0);
+
+        assertThat(burst.status().enabled()).isTrue();
+        assertThat(burst.busy()).isFalse();
+        assertThat(burst.status().events().get(0)).contains("거점을 옮기는 중");
+    }
+
+    @Test
+    void 대기_배포_중이면_바쁘고_빌드_id_를_알린다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+        assertThat(burst.busy()).isFalse();
+        burst.onDeployed(job("j1"));
+        waitPast(burst, CloudBurst.Phase.STANDBY);
+
+        assertThat(burst.status().standbyBuild()).isEqualTo("b1");
+        assertThat(burst.status().phaseSince()).isPositive();
+    }
+
     private static DeployJob job(String id) {
         return new DeployJob(id, "https://github.com/a/b", "main", null, "blog", 8080,
                 "/health", null, null, Map.of());
