@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>블루/그린 전환은 다음 요청부터 새 포트로 간다. 처리 중인 요청은 끝까지 기존 포트에서 처리한다</li>
  *   <li>클라우드 버스팅: 로컬에서 처리 중인 요청이 {@link #localLimit} 이면, 넘김 대상({@link #overflowTo})이
  *       켜져 있을 때 그 요청을 클라우드 Ingress 로 보낸다. 헤더는 그대로 넘기므로 Host 는 공개 주소다</li>
+ *   <li>점검({@link #pause}): 거점 전환으로 DB 를 옮기는 동안 모든 요청에 503 을 돌려준다</li>
  *   <li>클라우드 비율({@link #cloudShare}): 넘김 대상이 켜져 있으면 로컬 여유와 상관없이 요청마다 그 확률로 클라우드에 보낸다</li>
  * </ul>
  *
@@ -49,6 +50,8 @@ public final class UpstreamProxy implements AutoCloseable {
     private final int requestedPort;
     private ServerSocket server;
     private volatile int upstreamPort;
+    /** 점검 중이면 요청을 보내지 않고 503 을 돌려준다 */
+    private volatile boolean paused;
     private volatile boolean open;
     private volatile int localLimit = Integer.MAX_VALUE;
     private volatile InetSocketAddress overflow;
@@ -100,6 +103,15 @@ public final class UpstreamProxy implements AutoCloseable {
 
     public int upstreamPort() {
         return upstreamPort;
+    }
+
+    /** 점검을 켜면 다음 요청부터 503 + Retry-After 다. 처리 중인 요청은 끝까지 간다 */
+    public void pause(boolean paused) {
+        this.paused = paused;
+    }
+
+    public boolean paused() {
+        return paused;
     }
 
     /** 로컬 슬롯이 동시에 처리할 요청 수. 넘치면 넘김 대상으로 보낸다 */
@@ -179,6 +191,10 @@ public final class UpstreamProxy implements AutoCloseable {
                 int port = upstreamPort;
                 if (port == 0) {
                     reply(out, 503, "no upstream");
+                    return;
+                }
+                if (paused) {
+                    reply(out, 503, "maintenance");
                     return;
                 }
                 Slot slot = acquire();
@@ -422,7 +438,7 @@ public final class UpstreamProxy implements AutoCloseable {
     private static void reply(OutputStream out, int status, String message) throws IOException {
         byte[] body = message.getBytes(StandardCharsets.UTF_8);
         String head = "HTTP/1.1 " + status + " " + message + "\r\nContent-Type: text/plain\r\nContent-Length: "
-                + body.length + "\r\nConnection: close\r\n\r\n";
+                + body.length + (status == 503 ? "\r\nRetry-After: 30" : "") + "\r\nConnection: close\r\n\r\n";
         out.write(head.getBytes(StandardCharsets.ISO_8859_1));
         out.write(body);
         out.flush();

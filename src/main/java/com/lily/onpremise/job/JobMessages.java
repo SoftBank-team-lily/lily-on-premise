@@ -32,7 +32,7 @@ public final class JobMessages {
                     throw new IllegalArgumentException("app 이 올바르지 않습니다");
                 }
                 String id = node.path("id").asText("");
-                return new Inbound(null, app, id.isBlank() ? null : id, null, null);
+                return new Inbound(null, app, id.isBlank() ? null : id, null, null, false);
             }
             if ("home".equals(type)) {
                 String app = node.path("app").asText();
@@ -44,12 +44,13 @@ public final class JobMessages {
                     throw new IllegalArgumentException("home 은 cloud 또는 onprem 입니다");
                 }
                 String id = node.path("id").asText("");
-                return new Inbound(null, null, id.isBlank() ? null : id, app, home);
+                return new Inbound(null, null, id.isBlank() ? null : id, app, home,
+                        node.path("migrateDatabase").asBoolean(false));
             }
             if (!"job".equals(type)) {
                 throw new IllegalArgumentException("지원하지 않는 메시지입니다");
             }
-            return new Inbound(MAPPER.treeToValue(node, DeployJob.class).normalize(), null, null, null, null);
+            return new Inbound(MAPPER.treeToValue(node, DeployJob.class).normalize(), null, null, null, null, false);
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
@@ -57,7 +58,12 @@ public final class JobMessages {
         }
     }
 
-    /** job, rollbackApp, homeApp 중 하나만 채워진다 */
-    public record Inbound(DeployJob job, String rollbackApp, String id, String homeApp, String home) {
+    /**
+     * job, rollbackApp, homeApp 중 하나만 채워진다
+     *
+     * @param migrateDatabase 거점 전환 때 앱 DB 도 옮긴다 (클라우드로: 내 PC → RDS, 온프레미스로: RDS → 내 PC)
+     */
+    public record Inbound(DeployJob job, String rollbackApp, String id, String homeApp, String home,
+                          boolean migrateDatabase) {
     }
 }

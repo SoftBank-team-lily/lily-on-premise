@@ -186,6 +186,8 @@ public class WebSocketControlSession implements ControlSession {
         state.put("home", h.phase());
         state.put("movable", homes.movable());
         state.put("homeEvent", h.events().isEmpty() ? "" : h.events().get(0));
+        state.put("databaseMode", h.databaseMode());
+        state.put("databaseMovable", h.databaseMovable());
         return state;
     }
 
@@ -269,8 +271,9 @@ public class WebSocketControlSession implements ControlSession {
             try {
                 JobMessages.Inbound inbound = JobMessages.read(message.getPayload());
                 if (inbound.homeApp() != null) {
-                    log.info("home received: app={} home={}", inbound.homeApp(), inbound.home());
-                    jobs.getObject().home(inbound.homeApp(), inbound.home(), inbound.id());
+                    log.info("home received: app={} home={} migrateDatabase={}", inbound.homeApp(), inbound.home(),
+                            inbound.migrateDatabase());
+                    jobs.getObject().home(inbound.homeApp(), inbound.home(), inbound.id(), inbound.migrateDatabase());
                 } else if (inbound.rollbackApp() != null) {
                     log.info("rollback received: app={}", inbound.rollbackApp());
                     jobs.getObject().rollback(inbound.rollbackApp(), inbound.id());

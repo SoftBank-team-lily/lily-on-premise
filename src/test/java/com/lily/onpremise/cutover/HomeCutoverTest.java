@@ -37,6 +37,8 @@ class HomeCutoverTest {
     private boolean deployOk = true;
     private boolean dockerOk = true;
     private int deploys;
+    private final List<DeployJob> deployed = new ArrayList<>();
+    private final FakeMove move = new FakeMove();
     private HomeCutover cutover;
 
     @BeforeEach
@@ -47,6 +49,7 @@ class HomeCutoverTest {
                 properties(ORIGIN), dns, client, burst,
                 job -> {
                     deploys++;
+                    deployed.add(job);
                     return deployOk;
                 },
                 () -> dockerOk,
@@ -59,6 +62,103 @@ class HomeCutoverTest {
                 millis -> now[0] += 200_000,
                 null);
         cutover.note(job("job1", "postgres", null), true);
+        cutover.databaseMove(move);
+    }
+
+    @Test
+    void DB_를_RDS_로_옮기며_클라우드로_간다() {
+        cutover.note(local(), true);
+
+        cutover.begin("blog", "cloud", true);
+        cutover.perform();
+
+        assertThat(move.calls).containsExactly("rdsEnv", "pause:true", "toRemote");
+        assertThat(burst.parked).isTrue();
+        assertThat(burst.standbyModes).containsExactly("cloud");
+        assertThat(api.content).isEqualTo(ORIGIN);
+        assertThat(cutover.status().phase()).isEqualTo("CLOUD");
+        assertThat(cutover.status().databaseMode()).isEqualTo("cloud");
+    }
+
+    @Test
+    void RDS_로_옮기다_클라우드에_닿지_못하면_쓰기를_풀고_대기_배포를_되돌린다() {
+        cutover.note(local(), true);
+        reachable = false;
+
+        cutover.begin("blog", "cloud", true);
+        assertThatThrownBy(() -> cutover.perform()).hasMessageContaining("Pod");
+
+        assertThat(move.calls).containsExactly("rdsEnv", "pause:true", "toRemote", "pause:false");
+        assertThat(api.puts).isEmpty();
+        assertThat(cutover.status().phase()).isEqualTo("ONPREM");
+        assertThat(cutover.status().databaseMode()).isEqualTo("local");
+        assertThat(burst.again).extracting(DeployJob::databaseModeOrDefault).containsExactly("local");
+        assertThat(client.scales).endsWith(0);
+    }
+
+    @Test
+    void DB_를_내_PC_로_옮기며_돌아온다() {
+        cutover.note(local(), true);
+        cutover.begin("blog", "cloud", true);
+        cutover.perform();
+        later.task = null;
+        move.calls.clear();
+        client.scales.clear();
+
+        cutover.begin("blog", "onprem", true);
+        cutover.perform();
+
+        DeployJob sent = deployed.get(deployed.size() - 1);
+        assertThat(sent.databaseModeOrDefault()).isEqualTo("local");
+        assertThat(sent.importsDatabase()).isTrue();
+        assertThat(sent.databaseEnv()).containsEntry("DATABASE_URL", FakeMove.URL);
+        assertThat(client.scales).containsExactly(0);
+        assertThat(move.calls).containsExactly("rdsEnv", "pause:false");
+        assertThat(api.content).isEqualTo(TUNNEL);
+        assertThat(cutover.status().phase()).isEqualTo("ONPREM");
+        assertThat(cutover.status().databaseMode()).isEqualTo("local");
+
+        // 클라우드 Pod 는 RDS 를 본다. 30초 뒤 내 PC DB 를 보는 대기 배포로 바꾼다 (다시 가져오지는 않는다)
+        later.task.run();
+        DeployJob again = burst.again.get(burst.again.size() - 1);
+        assertThat(again.databaseModeOrDefault()).isEqualTo("local");
+        assertThat(again.importsDatabase()).isFalse();
+    }
+
+    @Test
+    void 내_PC_로_옮기다_로컬_배포가_실패하면_클라우드를_다시_띄운다() {
+        cutover.note(local(), true);
+        cutover.begin("blog", "cloud", true);
+        cutover.perform();
+        later.task = null;
+        client.scales.clear();
+        deployOk = false;
+
+        cutover.begin("blog", "onprem", true);
+        assertThatThrownBy(() -> cutover.perform()).hasMessageContaining("로컬 배포");
+
+        assertThat(client.scales).containsExactly(0, 2);
+        assertThat(api.content).isEqualTo(ORIGIN);
+        assertThat(cutover.status().phase()).isEqualTo("CLOUD");
+        assertThat(cutover.status().databaseMode()).isEqualTo("cloud");
+    }
+
+    @Test
+    void 옮길_수_없는_DB_는_전환_전에_거절한다() {
+        assertThatThrownBy(() -> cutover.begin("blog", "cloud", true)).hasMessageContaining("내 PC 에 있을 때만");
+
+        cutover.note(job("job1", "mysql", null).withDatabase("local", null, false), true);
+        assertThatThrownBy(() -> cutover.begin("blog", "cloud", true)).hasMessageContaining("postgres");
+
+        cutover.databaseMove(null);
+        cutover.note(local(), true);
+        assertThat(cutover.status().databaseMovable()).isFalse();
+        assertThatThrownBy(() -> cutover.begin("blog", "cloud", true)).hasMessageContaining("옮길 수 없습니다");
+        assertThat(api.puts).isEmpty();
+    }
+
+    private static DeployJob local() {
+        return job("job1", "postgres", null).withDatabase("local", null, false);
     }
 
     @Test
@@ -261,11 +361,39 @@ class HomeCutoverTest {
         }
     }
 
+    private static final class FakeMove implements DatabaseMove {
+        static final String URL = "postgresql://blog:pw@172.17.0.1:15432/blog";
+        private final List<String> calls = new ArrayList<>();
+
+        @Override
+        public Map<String, String> rdsEnv(DeployJob job) {
+            calls.add("rdsEnv");
+            return Map.of("DATABASE_URL", URL);
+        }
+
+        @Override
+        public void toRemote(String appName, Map<String, String> rdsEnv) {
+            calls.add("toRemote");
+        }
+
+        @Override
+        public void pause(boolean paused) {
+            calls.add("pause:" + paused);
+        }
+    }
+
     private static final class RecordingBurst implements BurstGate {
         private final BurstClient client;
         private java.util.function.BooleanSupplier gate = () -> true;
         private boolean parked;
         private boolean resumed;
+        private final List<String> standbyModes = new ArrayList<>();
+        private final List<DeployJob> again = new ArrayList<>();
+
+        @Override
+        public void standbyAgain(DeployJob job) {
+            again.add(job);
+        }
 
         private RecordingBurst(BurstClient client) {
             this.client = client;
@@ -278,6 +406,7 @@ class HomeCutoverTest {
 
         @Override
         public String standby(DeployJob job, String publicHost) {
+            standbyModes.add(job.databaseModeOrDefault());
             return client.standby(job, publicHost, job.database());
         }
 

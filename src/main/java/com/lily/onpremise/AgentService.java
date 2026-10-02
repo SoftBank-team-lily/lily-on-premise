@@ -91,7 +91,7 @@ public class AgentService implements JobSink {
     }
 
     @Override
-    public HomeCutover.Status home(String app, String target, String id) {
+    public HomeCutover.Status home(String app, String target, String id, boolean migrateDatabase) {
         if (app == null || !app.matches("[a-z][a-z0-9-]{0,30}")) {
             throw new IllegalArgumentException("app 이 올바르지 않습니다");
         }
@@ -104,7 +104,7 @@ public class AgentService implements JobSink {
         if (store.find(idValue).isPresent()) {
             throw new IllegalArgumentException("이미 받은 잡입니다: " + idValue);
         }
-        HomeCutover.Status status = cutover.begin(app, target);
+        HomeCutover.Status status = cutover.begin(app, target, migrateDatabase);
         if (status.already()) {
             return status;
         }

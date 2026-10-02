@@ -81,6 +81,19 @@ public record DeployJob(
         return databaseMode == null || databaseMode.isBlank() ? "cloud" : databaseMode;
     }
 
+    /**
+     * 같은 잡을 다른 DB 위치로. 거점 전환이 DB 를 옮긴 뒤의 잡이다
+     *
+     * @param databaseMode   cloud 또는 local
+     * @param databaseEnv    RDS 접속 정보 (터널 주소). importDatabase 일 때만
+     * @param importDatabase RDS 데이터를 이 PC DB 로 옮긴 뒤 띄운다
+     */
+    public DeployJob withDatabase(String databaseMode, Map<String, String> databaseEnv, boolean importDatabase) {
+        return new DeployJob(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env,
+                database, canaryPath, migrations, databaseEnv, "cloud".equals(databaseMode) ? null : databaseMode,
+                null, importDatabase ? Boolean.TRUE : null);
+    }
+
     /** 이 PC DB 를 띄우기 전에 클라우드 RDS 의 데이터를 옮긴다 */
     public boolean importsDatabase() {
         return Boolean.TRUE.equals(importDatabase);

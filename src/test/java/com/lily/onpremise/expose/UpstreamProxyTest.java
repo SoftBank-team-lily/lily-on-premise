@@ -71,6 +71,26 @@ class UpstreamProxyTest {
         }
     }
 
+    @Test
+    void 점검_중에는_503_과_Retry_After_를_돌려준다() throws Exception {
+        UpstreamProxy proxy = new UpstreamProxy(0);
+        proxy.start();
+        HttpServer local = listen("local");
+        try {
+            proxy.switchTo(local.getAddress().getPort());
+            proxy.pause(true);
+            HttpResponse<String> paused = get(proxy.port());
+            assertThat(paused.statusCode()).isEqualTo(503);
+            assertThat(paused.headers().firstValue("Retry-After")).contains("30");
+
+            proxy.pause(false);
+            assertThat(get(proxy.port()).body()).isEqualTo("local");
+        } finally {
+            proxy.close();
+            local.stop(0);
+        }
+    }
+
     private HttpResponse<String> get(int port) throws Exception {
         return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/")).build(),
                 HttpResponse.BodyHandlers.ofString());

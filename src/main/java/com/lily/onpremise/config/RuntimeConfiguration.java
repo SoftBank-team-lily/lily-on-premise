@@ -4,6 +4,7 @@ import com.lily.onpremise.AgentIdentity;
 import com.lily.onpremise.analyze.StackAnalyzer;
 import com.lily.onpremise.burst.BurstClient;
 import com.lily.onpremise.burst.CloudBurst;
+import com.lily.onpremise.cutover.AgentDatabaseMove;
 import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.burst.CloudDatabase;
 import com.lily.onpremise.burst.DatabaseTunnel;
@@ -180,12 +181,19 @@ public class RuntimeConfiguration {
             SlotBook slots,
             ContainerRuntime runtime,
             Commands commands,
-            ObjectMapper json) {
+            ObjectMapper json,
+            DatabaseModes databases,
+            LocalExposure exposure) {
         String dir = properties.workspace();
         Path root = dir == null || dir.isBlank()
                 ? Path.of(System.getProperty("java.io.tmpdir"), "lily-onprem")
                 : Path.of(dir);
-        return new HomeCutover(properties, hostnames, burst, pipeline, slots, runtime, commands, json, root);
+        HomeCutover cutover = new HomeCutover(properties, hostnames, burst, pipeline, slots, runtime, commands, json, root);
+        // 거점 전환과 같이 앱 DB 를 옮긴다. RDS 터널은 cloud 잡과 같은 주소에서 듣는다
+        AgentProperties.Database db = properties.database();
+        cutover.databaseMove(new AgentDatabaseMove(cutover::client, databases, new DatabaseTransfer(commands),
+                exposure.proxy(), db == null ? "172.17.0.1" : db.bindHost(), db == null ? 15432 : db.bindPort()));
+        return cutover;
     }
 
     @Bean

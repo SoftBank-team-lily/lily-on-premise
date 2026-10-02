@@ -22,4 +22,8 @@ public interface BurstGate {
      * @return builder 빌드 id
      */
     String standby(DeployJob job, String publicHost);
+
+    /** 거점 전환이 클라우드 대기 배포의 DB 를 바꿨다가 되돌린다. 버스팅이 켜져 있으면 이 잡으로 다시 대기 배포한다 */
+    default void standbyAgain(DeployJob job) {
+    }
 }

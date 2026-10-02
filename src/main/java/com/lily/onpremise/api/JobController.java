@@ -54,12 +54,14 @@ public class JobController {
     /** 공개 주소의 거점을 옮긴다. 이미 그 거점이면 200, 진행을 시작하면 202 */
     @PostMapping("/api/apps/{appName}/home")
     public ResponseEntity<HomeCutover.Status> move(@PathVariable String appName, @RequestBody HomeBody body) {
-        HomeCutover.Status status = service.home(appName, body == null ? null : body.home(), null);
+        HomeCutover.Status status = service.home(appName, body == null ? null : body.home(), null,
+                body != null && Boolean.TRUE.equals(body.migrateDatabase()));
         HttpStatus code = status.already() ? HttpStatus.OK : HttpStatus.ACCEPTED;
         return ResponseEntity.status(code).body(status);
     }
 
-    public record HomeBody(String home) {
+    /** @param migrateDatabase 앱 DB 도 옮긴다 (클라우드로: 내 PC → RDS, 온프레미스로: RDS → 내 PC) */
+    public record HomeBody(String home, Boolean migrateDatabase) {
     }
 
     /** 직전 슬롯으로 프록시를 되돌린다. 스키마는 그대로 둔다 */
