@@ -53,6 +53,11 @@ public final class DatabaseModes implements DatabaseAccess {
         return reverse;
     }
 
+    @Override
+    public void resume(Map<String, String> appEnv) {
+        cloud.resume(appEnv);
+    }
+
     /** RDS → 이 PC DB 이전. 없으면 importDatabase 잡을 거절한다 */
     public DatabaseModes transfer(DatabaseTransfer transfer) {
         this.transfer = transfer;

@@ -32,6 +32,7 @@ import com.lily.onpremise.schema.SchemaApply;
 import com.lily.onpremise.runtime.CliContainerRuntime;
 import com.lily.onpremise.runtime.ContainerRuntime;
 import com.lily.onpremise.runtime.SlotBook;
+import com.lily.onpremise.runtime.SlotRecovery;
 import com.lily.onpremise.source.GitWorkspace;
 import com.lily.onpremise.source.Workspace;
 import com.lily.onpremise.system.Commands;
@@ -64,6 +65,13 @@ public class RuntimeConfiguration {
     @Bean
     ContainerRuntime containerRuntime(Commands commands, AgentProperties properties) {
         return new CliContainerRuntime(commands, properties.sandbox());
+    }
+
+    @Bean
+    SlotRecovery slotRecovery(Commands commands, LocalExposure exposure, SlotBook slots, AgentProperties properties,
+                              DatabaseModes databases) {
+        return new SlotRecovery(commands, exposure, slots, properties.bluePort(), properties.greenPort(),
+                databases::resume);
     }
 
     @Bean

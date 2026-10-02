@@ -12,6 +12,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -71,6 +72,23 @@ class DatabaseTunnelTest {
         }
         assertThat(starts).hasValue(2);
         assertThat(listening.isBound() && !listening.isClosed()).isTrue();
+    }
+
+    @Test
+    void 다시_붙인_앱이_터널을_쓰면_연다() throws Exception {
+        DatabaseTunnel tunnel = new DatabaseTunnel(new AgentProperties.Database(
+                "bastion", "lily-tunnel", "/keys/id", "rds", 5432, "127.0.0.1", port), commands, work, 100);
+
+        tunnel.resumeFor(Map.of("PATH", "/bin"));
+        Thread.sleep(200);
+        assertThat(starts).hasValue(0);
+
+        tunnel.resumeFor(Map.of("DB_URL", "jdbc:postgresql://127.0.0.1:" + port + "/p_x"));
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (starts.get() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(starts).hasValue(1);
     }
 
     @Test

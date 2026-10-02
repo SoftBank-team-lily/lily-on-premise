@@ -47,6 +47,9 @@ public final class CliContainerRuntime implements ContainerRuntime {
         command.add("-d");
         command.add("--name");
         command.add(name);
+        // PC 를 다시 켜면 Docker 가 앱도 다시 띄운다. 에이전트는 기동할 때 이 슬롯을 다시 붙인다 (SlotRecovery)
+        command.add("--restart");
+        command.add("unless-stopped");
         command.add("-p");
         command.add("127.0.0.1:" + hostPort + ":" + containerPort);
         command.add("--memory");
