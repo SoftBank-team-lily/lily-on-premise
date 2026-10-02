@@ -345,7 +345,8 @@ class HomeCutoverTest {
                 new AgentProperties.Burst(true, "http://builder", "token", "127.0.0.1", 80, "",
                         8, 3, 30, 2, 1, ""),
                 new AgentProperties.Database("", "lily-tunnel", "", "", 5432, "172.17.0.1", 15432),
-                new AgentProperties.Cutover(origin));
+                new AgentProperties.Cutover(origin),
+                new AgentProperties.Sandbox("2g", "1", 1024));
     }
 
     private static AgentProperties.Cloudflare cloudflare() {

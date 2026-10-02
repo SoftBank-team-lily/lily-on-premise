@@ -311,7 +311,7 @@ class OnPremPipelineTest {
         String failStop;
 
         @Override
-        public void build(Path context, String image) {
+        public void build(Path context, String image, boolean generated) {
             calls.add("build");
         }
 

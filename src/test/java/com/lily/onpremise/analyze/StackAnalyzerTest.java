@@ -38,7 +38,7 @@ class StackAnalyzerTest {
 
         assertThat(plan.origin()).isEqualTo(DockerfilePlan.Origin.GENERATED);
         assertThat(plan.stack()).isEqualTo(DockerfilePlan.Stack.MAVEN);
-        assertThat(plan.content()).contains("mvnw");
+        assertThat(plan.content()).contains("mvnw").contains("RUN --network=default");
         assertThat(analyzer.healthPath(plan, null)).isEqualTo("/actuator/health/readiness");
     }
 }

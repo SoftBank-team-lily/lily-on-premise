@@ -48,6 +48,11 @@ lily:
     # 거점 전환: 공개 주소의 CNAME 내용물만 온프레 터널과 이 호스트 사이에서 바꾼다. IP 면 거절한다
     cutover:
       cloud-origin: ${CUTOVER_CLOUD_ORIGIN:}
+    # 사용자 레포를 이 PC 에서 빌드·실행할 때의 한도. 프로세스 수는 스레드를 포함한다
+    sandbox:
+      memory: ${AGENT_SANDBOX_MEMORY:2g}
+      cpus: ${AGENT_SANDBOX_CPUS:1}
+      pids: ${AGENT_SANDBOX_PIDS:1024}
     # 클라우드 RDS 연동: 배포 요청에 database 가 있으면 SSH 터널로 같은 DB 에 붙인다 (계정은 lily-builder 를 거쳐 받는다)
     database:
       ssh-host: ${DB_TUNNEL_SSH_HOST:}

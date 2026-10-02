@@ -68,11 +68,12 @@ public class StackAnalyzer {
         return Files.isRegularFile(context.resolve(name));
     }
 
+    /** 의존성을 받는 RUN 만 네트워크를 연다. 빌드는 {@code --network=none} 이다 */
     private static final String GRADLE = """
             FROM eclipse-temurin:21-jdk AS build
             WORKDIR /src
             COPY . .
-            RUN if [ -f gradlew ]; then chmod +x gradlew && ./gradlew bootJar -x test --no-daemon; \\
+            RUN --network=default if [ -f gradlew ]; then chmod +x gradlew && ./gradlew bootJar -x test --no-daemon; \\
                 else gradle bootJar -x test --no-daemon; fi \\
                 && find build/libs -type f -name '*.jar' ! -name '*-plain.jar' -exec cp {} /tmp/app.jar \\;
             FROM eclipse-temurin:21-jre
@@ -86,7 +87,7 @@ public class StackAnalyzer {
             FROM eclipse-temurin:21-jdk AS build
             WORKDIR /src
             COPY . .
-            RUN if [ -f mvnw ]; then chmod +x mvnw && ./mvnw -DskipTests package; \\
+            RUN --network=default if [ -f mvnw ]; then chmod +x mvnw && ./mvnw -DskipTests package; \\
                 else mvn -DskipTests package; fi \\
                 && find target -maxdepth 1 -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -exec cp {} /tmp/app.jar \\;
             FROM eclipse-temurin:21-jre
@@ -100,7 +101,7 @@ public class StackAnalyzer {
             FROM node:22-alpine
             WORKDIR /app
             COPY . .
-            RUN npm install --omit=dev
+            RUN --network=default npm install --omit=dev
             EXPOSE 3000
             CMD ["npm", "start"]
             """;
@@ -109,7 +110,7 @@ public class StackAnalyzer {
             FROM python:3.12-slim
             WORKDIR /app
             COPY . .
-            RUN pip install --no-cache-dir -r requirements.txt
+            RUN --network=default pip install --no-cache-dir -r requirements.txt
             EXPOSE 8080
             CMD ["sh", "-c", "if [ -f app.py ]; then python app.py; else python main.py; fi"]
             """;

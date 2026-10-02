@@ -62,8 +62,8 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    ContainerRuntime containerRuntime(Commands commands) {
-        return new CliContainerRuntime(commands);
+    ContainerRuntime containerRuntime(Commands commands, AgentProperties properties) {
+        return new CliContainerRuntime(commands, properties.sandbox());
     }
 
     @Bean

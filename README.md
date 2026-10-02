@@ -102,6 +102,18 @@ API 자격 증명이 없으면 이 호출을 하지 않습니다. 그때의 주�
 
 `docker-compose.yml` 또는 `compose.yaml`만 있는 저장소는 배포하지 않습니다. 슬롯 전환은 컨테이너 하나를 단위로 해야 하기 때문입니다. 이 경우 앱 Dockerfile이 필요하다는 오류와 함께 배포를 중단합니다.
 
+### 사용자 레포의 빌드와 실행을 가두는 이유
+
+에이전트는 사용자가 올린 저장소를 이 PC에서 클론한 뒤 `docker build`로 이미지를 만들고 `docker run`으로 띄웁니다. OS 패치, Docker 데몬, 이 PC에 둔 DB 비밀번호와 백업은 공개 주소의 Cloudflare 설정과 별개입니다. 온프레미스에서 정해야 하는 범위는 그 저장소가 이 PC에서 어디까지 쓰느냐입니다.
+
+본 모듈은 `CliContainerRuntime`에서 빌드와 실행에 같은 한도를 겁니다. 기본은 메모리 `2g`, CPU 1개, 프로세스 1024개입니다. 프로세스 수는 스레드를 포함합니다. JVM이 스레드를 수백 개까지 만들므로 상한을 그보다 작게 두지 않습니다. 값은 `AGENT_SANDBOX_MEMORY`, `AGENT_SANDBOX_CPUS`, `AGENT_SANDBOX_PIDS`로 바꿉니다.
+
+실행 중인 앱은 capability가 없고, `no-new-privileges`로 그 안에서 권한을 올리지 못합니다. 앱 포트는 `127.0.0.1`에만 엽니다. 컨테이너 포트가 1024 미만일 때만, 그 포트를 열기 위한 `NET_BIND_SERVICE`를 넣습니다. 호스트 디렉터리와 Docker 소켓은 빌드와 실행 어디에도 넘기지 않습니다.
+
+에이전트가 만든 Dockerfile은 의존성을 받는 `RUN`에만 `--network=default`를 두고, 그 빌드는 `--network=none`입니다. 저장소에 있는 Dockerfile은 어느 `RUN`이 의존성을 받는지 알 수 없어서 빌드 네트워크를 유지하고, 메모리·CPU·프로세스 한도만 적용합니다. 이 Docker가 buildx의 `--resource`를 거절하면 그 플래그만 빼고 같은 빌드를 다시 합니다. `--ulimit nproc`는 그대로입니다.
+
+이 한도는 앱 컨테이너의 사용량과 권한을 정합니다. 컨테이너는 이 PC와 커널을 같이 씁니다. 앱은 자기 DB 비밀번호를 환경변수로 받고, 로컬 DB는 도커 브리지 게이트웨이로 그 앱이 붙도록 열려 있습니다. 에이전트를 실행하는 계정은 Docker를 부르므로, 그 계정은 이 PC에서 컨테이너를 만들 수 있습니다.
+
 ### 트래픽 흐름
 
 사용자 트래픽과 배포 트래픽은 서로 독립적으로 동작합니다.
@@ -154,9 +166,9 @@ else:
 
 트래픽을 받는 컨테이너를 제외한 나머지 컨테이너를 정리
 
-docker build
+docker build (메모리·CPU·프로세스 한도, 호스트 마운트 없음)
 schema migrate (스크립트가 있을 때, 후보를 띄우기 전)
-docker run (target, 127.0.0.1:targetPort)
+docker run (127.0.0.1, 같은 한도, capability 없음)
 
 wait health(180s)
 judge candidate (이전 슬롯이 있을 때, 루프백만)
@@ -292,8 +304,8 @@ Active Slot은 프록시 upstream이 가리키는 루프백 포트입니다.
 
 분석 이후에 실행됩니다.
 
-* `docker build`로 로컬 태그를 만듭니다
-* `docker run`은 `127.0.0.1:{slotPort}:{targetPort}`만 엽니다
+* `docker build`로 로컬 태그를 만듭니다. 메모리·CPU·프로세스 한도가 있고, 호스트 디렉터리와 Docker 소켓은 넘기지 않습니다. 에이전트가 만든 Dockerfile은 의존성을 받는 `RUN`만 네트워크를 사용합니다
+* `docker run`은 `127.0.0.1:{slotPort}:{targetPort}`만 엽니다. 같은 한도와 `no-new-privileges`가 적용되고 capability는 없습니다. 컨테이너 포트가 1024 미만일 때만 `NET_BIND_SERVICE`를 넣습니다
 * 지우려는 컨테이너가 없으면 슬롯이 이미 비어 있는 것으로 보고 계속 진행합니다
 * Docker 데몬 오류는 배포 실패로 처리합니다
 
@@ -570,6 +582,9 @@ WebSocket 없이 같은 파이프라인을 실행할 때 사용합니다. 본문
 | `CLOUDFLARE_ZONE_ID`           | 비움      | DNS 레코드를 만들 존입니다                        |
 | `CLOUDFLARE_ZONE_NAME`         | 비움      | 예: `lily.dev`. 사용자 주소는 `https://{app}.{zone}`입니다 |
 | `AGENT_WORKSPACE`              | 임시 디렉터리 | git clone 위치입니다                         |
+| `AGENT_SANDBOX_MEMORY`         | `2g`    | 빌드와 앱 컨테이너의 메모리 한도입니다. 단위가 있어야 합니다 |
+| `AGENT_SANDBOX_CPUS`           | `1`     | 빌드와 앱 컨테이너의 CPU 한도입니다. `1`이면 한 개입니다 |
+| `AGENT_SANDBOX_PIDS`           | `1024`  | 프로세스 수 상한입니다. 스레드를 포함합니다. 64 이상 4096 이하입니다 |
 
 ---
 

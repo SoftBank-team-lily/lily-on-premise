@@ -27,7 +27,9 @@ public record AgentProperties(
         @DefaultValue Burst burst,
         @DefaultValue Database database,
         /** 공개 주소의 CNAME 을 클라우드 오리진으로 바꿀 때 쓴다. 비우면 거점 전환을 거절한다 */
-        @DefaultValue Cutover cutover) {
+        @DefaultValue Cutover cutover,
+        /** 사용자 레포를 이 PC 에서 빌드·실행할 때의 한도 */
+        @DefaultValue Sandbox sandbox) {
 
     /**
      * 플랫폼 연결. 컨트롤 플레인 주소만 있고 Cloudflare 자격(API 토큰, 터널 토큰)이 없으면
@@ -156,6 +158,38 @@ public record AgentProperties(
 
         private static boolean filled(String value) {
             return value != null && !value.isBlank();
+        }
+    }
+
+    /**
+     * 사용자 레포가 이 PC 를 끝까지 쓰지 못하게 하는 한도.
+     * 프로세스 수는 스레드를 포함한다. JVM 앱이 수백 개까지 만들므로 기본은 1024 다.
+     *
+     * @param memory docker 메모리. 단위가 있어야 한다. 예: 2g
+     * @param cpus   docker CPU. 1 이면 한 개
+     * @param pids   프로세스 수 상한
+     */
+    public record Sandbox(
+            @DefaultValue("2g") String memory,
+            @DefaultValue("1") String cpus,
+            @DefaultValue("1024") int pids) {
+
+        public Sandbox {
+            if (memory == null || !memory.matches("(?i)[1-9][0-9]{0,5}(?:k|m|g|kb|mb|gb)")) {
+                throw new IllegalArgumentException("메모리 한도가 올바르지 않습니다");
+            }
+            memory = memory.toLowerCase();
+            if (cpus == null || !cpus.matches("(?:0\\.[1-9]|[1-9](?:\\.[0-9])?|1[0-6](?:\\.0)?)")) {
+                throw new IllegalArgumentException("CPU 한도가 올바르지 않습니다");
+            }
+            if (pids < 64 || pids > 4096) {
+                throw new IllegalArgumentException("프로세스 한도가 올바르지 않습니다");
+            }
+        }
+
+        /** CFS 주기 100ms 기준. 1 CPU = 100000 */
+        public long cpuQuota() {
+            return Math.round(Double.parseDouble(cpus) * 100_000);
         }
     }
 }

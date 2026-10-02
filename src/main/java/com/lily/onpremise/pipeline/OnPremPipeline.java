@@ -155,7 +155,7 @@ public final class OnPremPipeline {
 
         String image = "lily-onprem/" + job.appName() + ":" + job.id();
         stage(record, publish, JobRecord.Status.BUILDING, "build: " + image);
-        runtime.build(context, image);
+        runtime.build(context, image, plan.origin() == DockerfilePlan.Origin.GENERATED);
 
         // 공개 주소가 보고 있는 포트에는 후보를 올리지 않는다. 헬스가 끝나기 전에 트래픽이 들어간다.
         int upstream = traffic.upstreamPort();
