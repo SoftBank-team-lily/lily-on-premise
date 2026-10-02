@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 온프레미스 → 클라우드 RDS SSH 포트포워딩.
@@ -104,6 +105,26 @@ public class DatabaseTunnel {
                 log.warn("db tunnel reopen failed: {}", e.getMessage());
             }
         }
+    }
+
+    /** 앱 환경변수가 이 터널 주소로 붙는다 */
+    public boolean usedBy(Map<String, String> appEnv) {
+        String address = settings.bindHost() + ":" + settings.bindPort();
+        return appEnv.values().stream().anyMatch(value -> value != null && value.contains(address));
+    }
+
+    /** 다시 붙인 앱이 이 터널을 쓰면 뒤에서 연다. 기동을 막지 않는다 */
+    public void resumeFor(Map<String, String> appEnv) {
+        if (!usedBy(appEnv)) {
+            return;
+        }
+        Thread.ofVirtual().name("lily-db-tunnel-resume").start(() -> {
+            try {
+                ensure();
+            } catch (RuntimeException e) {
+                log.warn("db tunnel resume failed: {}", e.getMessage());
+            }
+        });
     }
 
     public String host() {

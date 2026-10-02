@@ -5,7 +5,9 @@ import com.lily.onpremise.system.Commands;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -15,6 +17,7 @@ class SlotRecoveryTest {
 
     private final SlotBook slots = new SlotBook();
     private final Switch traffic = new Switch();
+    private final List<Map<String, String>> resumed = new ArrayList<>();
 
     @Test
     void 재시작하면_떠_있는_슬롯을_다시_붙인다() {
@@ -26,6 +29,8 @@ class SlotRecoveryTest {
         assertThat(recovery.recover()).contains("burst-demo-blue");
         assertThat(traffic.port).isEqualTo(18080);
         assertThat(slots.active("burst-demo")).contains(Slot.BLUE);
+        assertThat(resumed).singleElement()
+                .satisfies(env -> assertThat(env).containsEntry("DB_URL", "jdbc:postgresql://172.17.0.1:15432/p_x"));
     }
 
     @Test
@@ -67,7 +72,7 @@ class SlotRecoveryTest {
 
             @Override
             public String output(List<String> command) {
-                return ps;
+                return command.get(1).equals("inspect") ? "DB_URL=jdbc:postgresql://172.17.0.1:15432/p_x\nPATH=/bin\n" : ps;
             }
 
             @Override
@@ -78,7 +83,7 @@ class SlotRecoveryTest {
             public void close() {
             }
         };
-        return new SlotRecovery(commands, traffic, slots, 18080, 18081, open::contains);
+        return new SlotRecovery(commands, traffic, slots, 18080, 18081, open::contains, resumed::add);
     }
 
     private static final class Switch implements TrafficSwitch {

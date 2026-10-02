@@ -25,4 +25,9 @@ public class CloudDatabase implements DatabaseAccess {
         tunnel.ensure();
         return client.database(job.appName(), job.database(), tunnel.host(), tunnel.port());
     }
+
+    @Override
+    public void resume(Map<String, String> appEnv) {
+        tunnel.resumeFor(appEnv);
+    }
 }

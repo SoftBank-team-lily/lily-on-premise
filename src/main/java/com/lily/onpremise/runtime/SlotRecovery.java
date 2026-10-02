@@ -9,8 +9,11 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -18,7 +21,7 @@ import java.util.regex.Pattern;
 /**
  * 에이전트가 다시 뜨면 프록시가 보낼 슬롯을 모른다 ({@link SlotBook} 은 메모리에만 있다). 그동안 앱 컨테이너는 살아 있어도
  * 공개 주소가 503 이었다. 기동할 때 슬롯 포트({@code 127.0.0.1:bluePort|greenPort})에 떠 있는 {@code {app}-blue|green} 을 찾아
- * 다시 붙인다. 롤백 기록은 되살리지 않는다 (다음 배포부터 다시 쌓인다).
+ * 다시 붙인다. 그 앱이 쓰던 DB 터널도 다시 연다 ({@code resumed}). 롤백 기록은 되살리지 않는다 (다음 배포부터 다시 쌓인다).
  */
 public final class SlotRecovery {
 
@@ -31,19 +34,22 @@ public final class SlotRecovery {
     private final int bluePort;
     private final int greenPort;
     private final IntPredicate accepts;
+    private final Consumer<Map<String, String>> resumed;
 
-    public SlotRecovery(Commands commands, TrafficSwitch traffic, SlotBook slots, int bluePort, int greenPort) {
-        this(commands, traffic, slots, bluePort, greenPort, SlotRecovery::accepts);
+    public SlotRecovery(Commands commands, TrafficSwitch traffic, SlotBook slots, int bluePort, int greenPort,
+                        Consumer<Map<String, String>> resumed) {
+        this(commands, traffic, slots, bluePort, greenPort, SlotRecovery::accepts, resumed);
     }
 
     SlotRecovery(Commands commands, TrafficSwitch traffic, SlotBook slots, int bluePort, int greenPort,
-                 IntPredicate accepts) {
+                 IntPredicate accepts, Consumer<Map<String, String>> resumed) {
         this.commands = commands;
         this.traffic = traffic;
         this.slots = slots;
         this.bluePort = bluePort;
         this.greenPort = greenPort;
         this.accepts = accepts;
+        this.resumed = resumed;
     }
 
     /** @return 다시 붙인 컨테이너. 이미 보낼 곳이 있거나 떠 있는 슬롯이 없으면 비어 있다 */
@@ -77,9 +83,27 @@ public final class SlotRecovery {
             traffic.route(port);
             slots.commit(app, slot);
             log.info("slot restored: {} on 127.0.0.1:{}", name, port);
+            try {
+                resumed.accept(env(name));
+            } catch (RuntimeException e) {
+                log.warn("slot {} env not read: {}", name, e.getMessage());
+            }
             return Optional.of(name);
         }
         return Optional.empty();
+    }
+
+    private Map<String, String> env(String container) {
+        String listed = commands.output(List.of("docker", "inspect", "--format",
+                "{{range .Config.Env}}{{println .}}{{end}}", container));
+        Map<String, String> env = new LinkedHashMap<>();
+        for (String line : listed.split("\\R")) {
+            int eq = line.indexOf('=');
+            if (eq > 0) {
+                env.put(line.substring(0, eq), line.substring(eq + 1));
+            }
+        }
+        return env;
     }
 
     private static boolean publishes(String ports, int port) {

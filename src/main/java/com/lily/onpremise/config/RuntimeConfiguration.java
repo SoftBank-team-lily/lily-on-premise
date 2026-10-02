@@ -68,8 +68,10 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    SlotRecovery slotRecovery(Commands commands, LocalExposure exposure, SlotBook slots, AgentProperties properties) {
-        return new SlotRecovery(commands, exposure, slots, properties.bluePort(), properties.greenPort());
+    SlotRecovery slotRecovery(Commands commands, LocalExposure exposure, SlotBook slots, AgentProperties properties,
+                              DatabaseModes databases) {
+        return new SlotRecovery(commands, exposure, slots, properties.bluePort(), properties.greenPort(),
+                databases::resume);
     }
 
     @Bean

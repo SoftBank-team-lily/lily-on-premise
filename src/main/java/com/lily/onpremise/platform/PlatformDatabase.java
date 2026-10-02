@@ -26,6 +26,8 @@ public final class PlatformDatabase implements DatabaseAccess {
     private final AgentProperties.Database defaults;
     private final Path key;
     private volatile DatabaseTunnel tunnel;
+    /** 다시 붙인 앱이 터널을 쓴다. 인증서(welcome)가 오기 전이면 터널을 만들 때 연다 */
+    private Map<String, String> resumed;
 
     public PlatformDatabase(Commands commands, AgentProperties.Database defaults, Path workDir) {
         this.commands = commands;
@@ -65,6 +67,19 @@ public final class PlatformDatabase implements DatabaseAccess {
                 sshHost, sshUser, key.toString(), remoteHost, remotePort, defaults.bindHost(), defaults.bindPort());
         if (tunnel == null) {
             tunnel = new DatabaseTunnel(settings, commands, key.getParent());
+            if (resumed != null) {
+                tunnel.resumeFor(resumed);
+                resumed = null;
+            }
+        }
+    }
+
+    @Override
+    public synchronized void resume(Map<String, String> appEnv) {
+        if (tunnel != null) {
+            tunnel.resumeFor(appEnv);
+        } else {
+            resumed = Map.copyOf(appEnv);
         }
     }
 

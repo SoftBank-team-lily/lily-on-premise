@@ -33,4 +33,13 @@ public interface DatabaseAccess {
     default Map<String, String> agentEnv(DeployJob job, Map<String, String> appEnv) {
         return appEnv;
     }
+
+    /**
+     * 에이전트가 다시 떠서 이미 떠 있던 앱 슬롯을 다시 붙였다 ({@code SlotRecovery}). 그 앱이 쓰는 터널을 다시 연다.
+     * 터널은 배포할 때만 열려서, 다시 열지 않으면 앱은 떠 있어도 DB 에 붙지 못한다
+     *
+     * @param appEnv 다시 붙인 앱 컨테이너의 환경변수
+     */
+    default void resume(Map<String, String> appEnv) {
+    }
 }
