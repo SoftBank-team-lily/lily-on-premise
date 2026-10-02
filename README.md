@@ -25,7 +25,7 @@ flowchart TD
 
 에이전트 하나에는 공개 주소가 하나이고, 그 주소로 트래픽을 받는 앱도 하나입니다.
 
-데이터베이스는 만들지 않습니다. 데이터베이스 준비는 클라우드 경로의 DB 모듈이 담당합니다.
+DB 위치는 잡의 `databaseMode`로 정합니다. `cloud`(기본)는 클라우드 RDS를 SSH 터널로, `local`은 이 PC의 `lily-postgres`/`lily-mysql` 컨테이너를, `external`은 사용자가 준 `databaseUrl`을 씁니다. 자세한 내용은 [DB 위치](#db-위치)에 있습니다.
 
 ---
 
@@ -168,7 +168,7 @@ else:
 
 docker build (메모리·CPU·프로세스 한도, 호스트 마운트 없음)
 schema migrate (스크립트가 있을 때, 후보를 띄우기 전)
-docker run (127.0.0.1, 같은 한도, capability 없음)
+docker run (127.0.0.1, 같은 한도, capability 없음, --restart unless-stopped)
 
 wait health(180s)
 judge candidate (이전 슬롯이 있을 때, 루프백만)
@@ -285,6 +285,13 @@ Active Slot은 프로세스 메모리(`SlotBook`)에만 있습니다. 에이전�
 | `rootDir`    | 저장소 안의 빌드 디렉터리                                  |
 | `dockerfile` | 컨트롤 플레인이 만든 Dockerfile 본문. 비우면 저장소 파일 또는 생성 규칙을 사용 |
 | `env`        | 컨테이너 환경변수. `APP_COLOR`, `APP_VERSION`은 거절합니다   |
+| `database`   | `postgres` / `mysql`. 비우면 DB 없음                     |
+| `databaseMode` | `cloud`(기본) / `local` / `external`               |
+| `databaseUrl` | `external`일 때 `postgresql://user:pass@host:port/db` 또는 `mysql://...` |
+| `databaseEnv` | 컨트롤 플레인이 터널 주소로 만든 RDS 접속 환경변수 (`cloud`) |
+| `importDatabase` | `local` + postgres일 때 RDS 데이터를 이 PC DB로 옮긴 뒤 띄웁니다 |
+| `canaryPath` | 전환 전 판정 경로. 비우면 헬스 경로 |
+| `migrations` | 파일명 → SQL                                  |
 
 `repoUrl`에 사용자 정보가 들어 있으면 거절합니다. 토큰은 `token` 필드로만 받습니다.
 
@@ -317,7 +324,7 @@ Active Slot은 프로세스 메모리(`SlotBook`)에만 있습니다. 에이전�
 분석 이후에 실행됩니다.
 
 * `docker build`로 로컬 태그를 만듭니다. 메모리·CPU·프로세스 한도가 있고, 호스트 디렉터리와 Docker 소켓은 넘기지 않습니다. 에이전트가 만든 Dockerfile은 의존성을 받는 `RUN`만 네트워크를 사용합니다
-* `docker run`은 `127.0.0.1:{slotPort}:{targetPort}`만 엽니다. 같은 한도와 `no-new-privileges`가 적용되고 capability는 없습니다. 컨테이너 포트가 1024 미만일 때만 `NET_BIND_SERVICE`를 넣습니다
+* `docker run`은 `127.0.0.1:{slotPort}:{targetPort}`만 엽니다. 같은 한도와 `no-new-privileges`가 적용되고 capability는 없습니다. 컨테이너 포트가 1024 미만일 때만 `NET_BIND_SERVICE`를 넣습니다.
 * 지우려는 컨테이너가 없으면 슬롯이 이미 비어 있는 것으로 보고 계속 진행합니다
 * 앱 컨테이너는 `--restart unless-stopped`로 띄웁니다. PC를 다시 켜면 Docker가 앱을 다시 띄우고, 에이전트는 기동할 때 그 슬롯을 다시 붙입니다
 * Docker 데몬 오류는 배포 실패로 처리합니다
@@ -378,7 +385,7 @@ Exposure가 열린 뒤에 실행됩니다.
 단계 이름은 `JobRecord.Status`입니다.
 
 ```text
-QUEUED → CHECKOUT → ANALYZE → BUILDING → STARTING → HEALTH → SWITCHING → SUCCEEDED
+QUEUED → CHECKOUT → ANALYZE → BUILDING → STARTING → HEALTH → JUDGING → SWITCHING → SUCCEEDED
 ```
 
 실패하면 마지막 상태가 `FAILED`이고, 로그에 이유가 남습니다. 이 머신의 잡 목록은 프로세스가 실행 중인 동안만 유지됩니다.
@@ -462,7 +469,7 @@ Ready가 된 뒤 upstream은 다시 `blue`가 됩니다.
 
 ## 온보딩
 
-에이전트는 Docker와 Git이 있는 호스트에서 실행합니다. 에이전트를 컨테이너 안에서 실행하면 그 호스트의 Docker 소켓과 cloudflared에 직접 접근하지 못합니다.
+에이전트는 Docker와 Git이 있는 호스트에서 jar로 실행하거나, 호스트 Docker 소켓을 마운트한 공개 이미지로 실행합니다 (이미지에 docker CLI와 cloudflared가 들어 있습니다).
 
 터널 없이 기동하면 이 머신의 프록시가 공개 주소입니다. 첫 배포가 성공하기 전에는 `8099`로 들어온 요청에 503을 돌려줍니다.
 
@@ -518,7 +525,7 @@ docker rm -f lily-agent; docker run -d --name lily-agent --restart unless-stoppe
 
 ```text
 에이전트 → hello   {..., "platform": true, "sshPublicKey": "ssh-ed25519 ...", "databaseHost": "172.17.0.1", "databasePort": 15432}
-builder  → welcome {"tunnelAgentId": "agent-{key}", "cloudflare": {accountId, zoneId, zoneName}, "database": {sshHost, sshUser, remoteHost, remotePort, certificate}}
+builder  → welcome {"tunnelAgentId": "agent-{key}", "cloudflare": {accountId, zoneId, zoneName}, "database": {sshHost, sshUser, remoteHost, remotePort, certificate, reverseHost, reversePort}, "burst": {ingressHost, ingressPort, cloudOrigin, app}}
 에이전트 → cloudflare {"rid": "..", "method": "PUT", "path": "/accounts/../cfd_tunnel/../configurations", "body": {...}}
 builder  → cloudflare {"rid": "..", "ok": true, "result": {...}}
 builder  → job     {..., "database": "postgres", "databaseEnv": {"DB_URL": "jdbc:postgresql://172.17.0.1:15432/...", ...}}
@@ -528,12 +535,14 @@ builder  → job     {..., "database": "postgres", "databaseEnv": {"DB_URL": "jd
 * DB: 에이전트가 이 머신에서 만든 키에 builder 가 SSH CA 로 서명한 인증서(기본 24시간, 다시 연결할 때마다 새로)를 씁니다. 배스천 `lily-tunnel` 은 CA 를 `cert-authority,restrict,port-forwarding,permitopen="RDS:5432"` 로 믿습니다
 * DB 계정은 잡의 `databaseEnv` 로 옵니다 (클라우드와 같은 projectId = 앱 이름이라 같은 DB)
 * welcome 에 cloudflare 가 없거나 60초 안에 오지 않으면 quick tunnel(`trycloudflare.com`), database 가 없으면 DB 없는 앱만 받습니다
-* 이 머신에 `CLOUDFLARE_API_TOKEN` 등이나 `DB_TUNNEL_*` 가 있으면 그 설정이 우선합니다 (팀 PC 의 `scripts/agent.sh` + `test/burst/*.env`). 버스팅·거점 전환은 지금도 그 설정이 필요합니다
+* 이 머신에 `CLOUDFLARE_API_TOKEN` 등이나 `DB_TUNNEL_*` 가 있으면 그 설정이 우선합니다 (팀 PC 의 `scripts/agent.sh` + `test/burst/*.env`)
+* welcome 에 `burst`(`ingressHost`, `ingressPort`, `cloudOrigin`, `app`)가 오면 버스팅과 거점 전환도 이 소켓으로 됩니다. builder 호출은 소켓 `burst` 로 중계합니다 (`RelayBurstClient`)
+* welcome `database` 에 `reverseHost`·`reversePort` 가 오면 이 PC 의 DB(`local`·`external`)를 그 주소로 클라우드 대기 Pod 에 엽니다
 
 접속 직후 에이전트가 보내는 메시지입니다.
 
 ```json
-{"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false}
+{"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false,"databaseModes":["cloud","local","external","import"],"features":["burst","home","home-cancel","remediate"]}
 ```
 
 컨트롤 플레인이 같은 소켓으로 보내는 잡입니다.
@@ -572,6 +581,10 @@ WebSocket 없이 같은 파이프라인을 실행할 때 사용합니다. 본문
 | GET    | `/api/jobs`    | 이 프로세스의 잡 목록입니다. 최신순입니다    |
 | GET    | `/api/jobs/{id}` | 상태와 단계 로그를 반환합니다          |
 | GET    | `/api/agent`   | 에이전트 id, 소켓 연결 여부, 공개 주소를 반환합니다 |
+| GET    | `/api/burst`   | 버스팅 단계, 로컬·클라우드 처리 중 요청, 최근 이벤트 |
+| GET    | `/api/apps/{app}/home` | 거점, 진행 단계, 이벤트 |
+| POST   | `/api/apps/{app}/home` | 거점 전환. 본문 `{"home":"cloud", "migrateDatabase":false}` (`home` 은 `cloud`·`onprem`). 이미 그 거점이면 200, 시작하면 202 |
+| POST   | `/api/apps/{app}/rollback` | 직전 슬롯으로 되돌립니다. 스키마는 그대로입니다. 거점이 클라우드면 거절 |
 
 이 머신에서는 한 번에 하나의 잡만 슬롯을 바꿉니다. 같은 id의 잡이 이미 있으면 거절합니다.
 
@@ -594,10 +607,12 @@ WebSocket 없이 같은 파이프라인을 실행할 때 사용합니다. 본문
 | `CLOUDFLARE_ACCOUNT_ID`        | 비움      | 터널을 만들 Cloudflare 계정입니다                 |
 | `CLOUDFLARE_ZONE_ID`           | 비움      | DNS 레코드를 만들 존입니다                        |
 | `CLOUDFLARE_ZONE_NAME`         | 비움      | 예: `lily.dev`. 사용자 주소는 `https://{app}.{zone}`입니다 |
-| `AGENT_WORKSPACE`              | 임시 디렉터리 | git clone 위치입니다                         |
+| `AGENT_WORKSPACE`              | `{tmpdir}/lily-onprem` | git clone, 로컬 DB 비밀번호, 거점 기억 파일 위치입니다 |
 | `AGENT_SANDBOX_MEMORY`         | `2g`    | 빌드와 앱 컨테이너의 메모리 한도입니다. 단위가 있어야 합니다 |
 | `AGENT_SANDBOX_CPUS`           | `1`     | 빌드와 앱 컨테이너의 CPU 한도입니다. `1`이면 한 개입니다 |
 | `AGENT_SANDBOX_PIDS`           | `1024`  | 프로세스 수 상한입니다. 스레드를 포함합니다. 64 이상 4096 이하입니다 |
+| `CUTOVER_CLOUD_ORIGIN`         | 비움      | 거점 전환 때 CNAME 내용물로 쓸 클라우드 호스트(ALB)입니다. IP는 거절합니다. 플랫폼 연결이면 welcome으로 받습니다 |
+| `AGENT_REMEDIATE_ENABLED`      | `false` | 로컬 5xx 사건 보고입니다. 꺼져 있으면 횟수만 셉니다 |
 
 ---
 
@@ -656,7 +671,7 @@ SPRING_PROFILES_ACTIVE=local
 
 | 단계 | 조건 | 동작 |
 |---|---|---|
-| STANDBY | 온프레미스 배포 성공 | lily-builder `/api/burst` 로 같은 레포를 클라우드에 빌드·배포하고 레플리카 0 으로 대기. Ingress 호스트는 공개 주소와 같다 |
+| STANDBY | 온프레미스 배포 성공, 버스팅 켜짐, 공개 주소가 온프레미스 | lily-builder `/api/burst` 로 같은 레포를 클라우드에 빌드·배포하고 레플리카 0 으로 대기. Ingress 호스트는 공개 주소와 같다 |
 | WARMING | 대기 배포 완료 | 클라우드 레플리카 `warmReplicas` 로. Ingress 로 Pod 까지 닿으면 넘김을 켠다 (`warmReplicas` 0 이면 건너뜀) |
 | IDLE | 대기 완료 | 로컬이 한도 안에서 처리. 대기 Pod 가 있으면 한도를 넘는 요청은 바로 클라우드로 |
 | SCALING | 대기 Pod 없이 로컬 처리 중 요청이 한도 이상인 채로 `scaleUpAfterSeconds` 초 | 클라우드 레플리카 `replicas` 로 |
@@ -671,12 +686,15 @@ SPRING_PROFILES_ACTIVE=local
 - 클라우드에 붙지 못하면 그 요청은 로컬로 보낸다
 - WebSocket 은 연결이 끝날 때까지 처음 정한 쪽에 붙는다
 - 클라우드 빌드는 레포의 Dockerfile 을 쓴다 (에이전트가 만든 Dockerfile 은 클라우드로 가지 않는다)
+- 수동 비율: 소켓 `{"type":"burst","app","enabled","cloudPercent"}` (0~100). 대기 Pod 에 닿은 뒤 요청마다 그 확률로 클라우드에 보낸다. 넘침 넘김은 비율과 별개로 그대로다
+- 거점 전환 중에는 켜기·끄기를 거절하고, 공개 주소가 클라우드면 켜기를 거절한다 (늦게 끝난 대기 배포가 공개 주소를 받는 클라우드 Pod 를 0 으로 내리는 문제)
+- 상태 보고 `burst-state` (3초마다): 버스팅 `enabled`·`cloudPercent`·`phase`·처리 중 요청, 거점 `home`·`homeSteps`·`homeStep`·`homeCancellable`·`databaseMode`·`databaseMovable`, 자원 `homeCpuPercent`·`homeMemoryMiB`·`homeMemoryPercent`(docker stats)·`homeP95Ms`(이 PC 가 처리한 최근 5분 요청)
 - 에이전트가 다시 뜨면 다시 붙인 앱으로 버스팅을 이어 간다 (`CloudBurst.recover`). 대기 배포를 새로 하지 않고, 클라우드에 남은 대기 배포의 레플리카를 `warmReplicas` 로 맞춘 뒤 닿으면 넘김을 켠다. 대기 배포가 없거나(404) 버스팅이 꺼져 있으면 다음 배포를 기다린다. 거점이 클라우드면 앱만 기억하고 거점이 돌아올 때 이어 간다
 - PC 가 꺼졌을 때는 버스팅이 아니라 lily-builder 의 엣지 Worker 와 CNAME 전환이 클라우드로 보낸다 (lily-builder `docs/장애-자동-전환.md`)
 
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
-| `BURST_ENABLED` | `false` | |
+| `BURST_ENABLED` | `false` | 처음 값. 화면(소켓 `burst`)에서 켜고 끈다 |
 | `BURST_BUILDER_URL` | | lily-builder 공개 주소. 예: `https://builder.apps.lilycloud.kr` |
 | `BURST_API_TOKEN` | | lily-builder 의 `BURST_API_TOKEN` (k3s Secret `lily-system/lily-burst`) |
 | `BURST_INGRESS_HOST` / `BURST_INGRESS_PORT` | / `80` | 넘길 클라우드 Ingress |
@@ -717,3 +735,48 @@ SPRING_PROFILES_ACTIVE=local
 DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를 거쳐 받는다).
 
 검증 (2026-09-30): 온프레미스에서 쓴 글을 버스팅된 클라우드 Pod 가 읽고, 클라우드 Pod 에 쓴 글을 스케일 다운 뒤 온프레미스에서 읽음.
+
+
+## DB 위치
+
+잡의 `databaseMode` 로 앱 DB 를 어디에 둘지 정한다.
+
+| 모드 | DB | 클라우드 대기 Pod |
+|---|---|---|
+| `cloud` (기본) | 클라우드 RDS. 에이전트가 `ssh -L` 터널로 붙는다 (위 DB 공유) | 같은 RDS |
+| `local` | 이 PC 의 `lily-postgres`(25432)·`lily-mysql`(23306) 컨테이너. host 네트워크로 `127.0.0.1`·`172.17.0.1` 에만 듣고, 앱마다 database 와 계정 하나. 데이터는 named volume 에 남는다 | 역방향 터널 |
+| `external` | 사용자가 준 `databaseUrl`. `localhost` 는 앱에 `host.docker.internal` 로 넘기고, 배포 전에 TCP 연결을 확인한다 | 역방향 터널 |
+
+- 역방향 터널: 플랫폼이 welcome 으로 `reverseHost`·`reversePort` 를 주면 `ssh -R {reverseHost}:{reversePort}:{DB}` 로 이 PC 의 DB 를 lily-server 사설 IP 에 연다. 끊기면 5초 뒤 다시 연다 (`ReverseTunnel`). 인증서 key ID 가 `agent-{key}-p{port}` 라 배스천은 그 포트 하나만 허용한다
+- 역방향 터널이 없으면 `local`·`external` 앱의 클라우드 대기 배포는 하지 않는다
+- DB 가 이 PC 에 있으면 PC 가 꺼질 때 DB 도 꺼져 클라우드가 이어받지 못한다
+
+## 거점 전환
+
+공개 주소 `{app}.{zone}` 의 CNAME 내용물만 이 PC 터널과 클라우드 오리진(ALB) 사이에서 바꾼다. 목적지가 Ready 이기 전에는 DNS 를 부르지 않는다.
+
+| 방향 | 단계 |
+|---|---|
+| 클라우드로 | `STANDBY`(이번 잡의 대기 배포가 없을 때) → `COPY`(DB 이전 시) → `SCALE` → `DNS` → `VERIFY` |
+| 온프레미스로 | `PAUSE`(DB 이전 시) → `DEPLOY` → `DNS` → `VERIFY` |
+
+- `VERIFY` 는 공개 주소를 2초 간격으로 30초까지 다시 연다. 30초 안에 한 번도 성공하지 못하면 CNAME 을 되돌린다 (CNAME 을 바꾼 직후 Cloudflare 반영 전 2~4초 오류 때문)
+- 취소는 소켓 `home-cancel`. `DNS` 전 단계에서만 받고, 출발 거점으로 돌아간다
+- 버스팅 대기 배포 중에는 거점 전환을 거절한다
+- 에이전트가 다시 뜨면 CNAME 을 보고 거점을 복구한다 (슬롯·DB 터널·버스팅은 [에이전트 재시작](#에이전트-재시작))
+
+### DB 이전 (`migrateDatabase`)
+
+PostgreSQL 이고 DB 가 출발 거점 쪽에 있을 때만 된다 (클라우드로: `local`, 온프레미스로: `cloud`).
+
+- 클라우드로: 버스팅 넘김을 멈추고 RDS 를 준비해 대기 배포를 RDS 로 → 프록시 점검 모드로 쓰기를 멈춤(`503 maintenance`, `Retry-After: 30`) → 이 PC DB 를 RDS 로 복사 → 주소 전환
+- 온프레미스로: 클라우드를 0 으로 내려 쓰기를 멈춤 → RDS 를 이 PC DB 로 가져와 로컬 배포(`importDatabase`) → 주소 전환. 덮어쓰기 전에 이 PC DB 를 `{db}_bak_{시각}` 으로 복제한다 (마지막 하나만)
+- 복사 뒤 테이블 목록과 테이블별 행 수를 비교한다. 원본 DB 는 지우지 않는다
+- 주소 전환 전에 실패하면 쓰기 멈춤을 풀고 원본 쪽이 계속 받는다
+
+## 5xx 사건 보고
+
+`AGENT_REMEDIATE_ENABLED=true` 일 때만 보낸다 (기본은 횟수만 센다).
+
+- 30초마다 최근 1분을 본다. 요청 20건 이상이고 5xx 가 5% 이상이면 CRITICAL
+- 거점이 온프레미스이고 CRITICAL 이 두 번 연속이면 슬롯 로그(`docker logs --tail 200 --since 15m`)를 읽어 소켓 `{"type":"remediate","app","signature","log","files"}` 로 보낸다. builder 가 lily-frontend 로 넘긴다
