@@ -19,6 +19,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * external 사용자가 준 DB 주소 ({@link ExternalDatabase})
  * </pre>
  *
+ * local 잡이 importDatabase 면 이 PC DB 를 만든 뒤 클라우드 RDS(databaseEnv, 터널 주소)의 스키마와 데이터를 옮긴다
+ * ({@link DatabaseTransfer#toLocal}). 클라우드 앱을 이 PC 로 옮길 때다.
+ *
  * local·external 은 플랫폼이 역방향 터널을 주면 그 DB 를 클라우드에 연다.
  * 클라우드 대기 배포는 {@link #cloudEnv} 의 접속 정보(배스천 주소 기준)를 받는다.
  */
@@ -30,6 +33,7 @@ public final class DatabaseModes implements DatabaseAccess {
     private final LocalDatabase local;
     private final ExternalDatabase external;
     private final ReverseTunnel reverse;
+    private volatile DatabaseTransfer transfer;
     /** 앱 → 온프레미스 DB. agent 쪽이 역방향 터널의 대상이고, 계정은 클라우드 대기 Pod 도 같이 쓴다 */
     private final Map<String, ExternalDatabase.Resolved> onPrem = new ConcurrentHashMap<>();
 
@@ -49,12 +53,21 @@ public final class DatabaseModes implements DatabaseAccess {
         return reverse;
     }
 
+    /** RDS → 이 PC DB 이전. 없으면 importDatabase 잡을 거절한다 */
+    public DatabaseModes transfer(DatabaseTransfer transfer) {
+        this.transfer = transfer;
+        return this;
+    }
+
     @Override
     public Map<String, String> prepare(DeployJob job) {
         String engine = job.database();
         return switch (job.databaseModeOrDefault()) {
             case "local" -> {
                 DatabaseCredentials db = local.prepare(engine, job.appName());
+                if (job.importsDatabase()) {
+                    importFromCloud(job);
+                }
                 open(job.appName(), new ExternalDatabase.Resolved(db, db));
                 yield db.env();
             }
@@ -69,6 +82,18 @@ public final class DatabaseModes implements DatabaseAccess {
                 yield cloud.prepare(job);
             }
         };
+    }
+
+    /** RDS 터널을 열고 그 DB 를 이 PC DB 로 덮어쓴다. 이전 PC DB 는 백업으로 남는다 */
+    private void importFromCloud(DeployJob job) {
+        DatabaseTransfer current = transfer;
+        if (current == null) {
+            throw new IllegalStateException("이 에이전트는 RDS 데이터를 옮길 수 없습니다");
+        }
+        // cloud 잡과 같은 길로 RDS 터널을 연다. 접속 정보는 컨트롤 플레인이 databaseEnv 로 보낸 것이다
+        Map<String, String> rds = cloud.prepare(job);
+        String backup = current.toLocal(job.appName(), DatabaseTransfer.fromEnv(rds));
+        log.info("imported cloud database into this pc: app={} backup={}", job.appName(), backup);
     }
 
     /** 에이전트에서 붙을 주소 (스키마 적용). external 이 localhost 면 앱과 에이전트의 주소가 다르다 */

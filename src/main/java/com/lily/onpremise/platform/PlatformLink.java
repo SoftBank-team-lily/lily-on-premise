@@ -52,7 +52,8 @@ public class PlatformLink {
         if (properties.platformExposure()) {
             extra.put("platform", true);
         }
-        extra.put("databaseModes", List.of("cloud", "local", "external"));
+        // import: local 잡의 importDatabase (클라우드 RDS 데이터를 이 PC DB 로 옮겨서 띄우기)
+        extra.put("databaseModes", List.of("cloud", "local", "external", "import"));
         if (platformDatabase() instanceof PlatformDatabase db) {
             try {
                 extra.put("sshPublicKey", db.publicKey());
