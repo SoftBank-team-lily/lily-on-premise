@@ -95,6 +95,8 @@ public final class LocalDatabase {
         }
         String admin = secret("postgres-admin");
         ensurePostgres(admin);
+        // 컨테이너는 볼륨째 남고 작업 폴더만 새로 생기면 admin 비밀번호가 어긋난다. 소켓(trust)으로 맞춘 뒤 TCP 로 init
+        psql("ALTER ROLE postgres WITH PASSWORD '" + admin + "'", "postgres: admin password");
         // 이 PC 의 DB 컨테이너는 SSL 이 없다
         cli.init(new DbTarget("jdbc:postgresql://" + bindHost + ":" + POSTGRES_PORT + "/" + name, "postgres", admin, "disable"));
         for (String grant : List.of(

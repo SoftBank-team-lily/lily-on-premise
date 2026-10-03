@@ -318,6 +318,10 @@ public final class AgentPgroll implements PgrollStep {
         env.put("DB_URL", target.url());
         env.put("DB_USERNAME", target.username());
         env.put("DB_PASSWORD", target.password());
+        // 창이 닫힐 때의 complete 와 전환 뒤 rollback 도 같은 sslmode 로 붙어야 한다 (이 PC 의 DB 는 SSL 이 없다)
+        if (target.sslmode() != null) {
+            env.put(DbTarget.SSLMODE, target.sslmode());
+        }
         return env;
     }
 }
