@@ -115,6 +115,18 @@ public final class LocalDatabase {
         log.info("pgroll enabled on local postgres: db={}", name);
     }
 
+    private List<String> backups(String name) {
+        String listed;
+        try {
+            listed = commands.output(List.of("docker", "exec", "lily-postgres", "psql", "-U", "postgres",
+                    "-p", String.valueOf(POSTGRES_PORT), "-Atc",
+                    "SELECT datname FROM pg_database WHERE datname ~ '^" + name + "_bak_[0-9]{14}$'"));
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("postgres: 백업 DB 목록을 읽지 못했다" + reason(e));
+        }
+        return listed.lines().map(String::trim).filter(line -> line.matches(name + "_bak_\\d{14}")).toList();
+    }
+
     /**
      * 앱을 지울 때. 이 PC 의 DB 컨테이너에 있는 앱 database 와 계정을 지우고 저장한 비밀번호도 지운다.
      * 엔진 컨테이너가 없으면 그 엔진은 건너뛴다 (컨테이너를 새로 띄우지 않는다)
@@ -132,6 +144,11 @@ public final class LocalDatabase {
                     "-p", String.valueOf(POSTGRES_PORT), "-U", "postgres"), "postgres");
             // 접속 중인 세션이 있어도 지운다 (앱 컨테이너는 이미 내렸다)
             psql("DROP DATABASE IF EXISTS \"" + name + "\" WITH (FORCE)", "postgres: drop database " + name);
+            // RDS 에서 가져올 때 남긴 백업({db}_bak_{시각})도 이 계정 소유라 먼저 지운다
+            for (String backup : backups(name)) {
+                psql("DROP DATABASE IF EXISTS \"" + backup + "\" WITH (FORCE)", "postgres: drop backup " + backup);
+                dropped.add("postgres " + backup);
+            }
             psql("DROP ROLE IF EXISTS \"" + name + "\"", "postgres: drop role " + name);
             dropped.add("postgres " + name);
         }

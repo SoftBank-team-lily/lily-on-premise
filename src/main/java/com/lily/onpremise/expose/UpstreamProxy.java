@@ -98,8 +98,9 @@ public final class UpstreamProxy implements AutoCloseable {
         }
     }
 
+    /** @param port 슬롯 포트. 0 이면 보낼 곳을 떼어 503 (no upstream) 을 돌려준다 (앱 삭제) */
     public void switchTo(int port) {
-        if (port < 1 || port > 65535) {
+        if (port < 0 || port > 65535) {
             throw new IllegalArgumentException("upstream port");
         }
         this.upstreamPort = port;
