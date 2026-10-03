@@ -19,6 +19,21 @@ class LocalDatabaseDropTest {
     @TempDir
     Path dir;
     private final List<List<String>> runs = new ArrayList<>();
+    /** 백업 DB 목록 질의의 결과 */
+    private String backups = "";
+
+    @Test
+    void RDS에서_가져올_때_남긴_백업_DB도_계정보다_먼저_지운다() {
+        backups = "blog_app_bak_20261003053435\n";
+
+        List<String> dropped = database(Set.of("lily-postgres")).drop("blog-app");
+
+        assertThat(dropped).containsExactly("postgres blog_app_bak_20261003053435", "postgres blog_app");
+        assertThat(sql()).containsSubsequence(
+                "DROP DATABASE IF EXISTS \"blog_app\" WITH (FORCE)",
+                "DROP DATABASE IF EXISTS \"blog_app_bak_20261003053435\" WITH (FORCE)",
+                "DROP ROLE IF EXISTS \"blog_app\"");
+    }
 
     @Test
     void postgres_컨테이너가_있으면_앱_DB를_FORCE로_지우고_계정과_비밀번호_파일도_지운다() throws Exception {
@@ -61,6 +76,11 @@ class LocalDatabaseDropTest {
                 if (command.size() == 3 && command.get(1).equals("start") && !containers.contains(command.get(2))) {
                     throw new IllegalStateException("docker start " + command.get(2) + " → Error: No such container");
                 }
+            }
+
+            @Override
+            public String output(List<String> command) {
+                return backups;
             }
 
             @Override
