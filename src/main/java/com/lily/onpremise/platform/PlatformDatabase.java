@@ -65,7 +65,12 @@ public final class PlatformDatabase implements DatabaseAccess {
         }
         AgentProperties.Database settings = new AgentProperties.Database(
                 sshHost, sshUser, key.toString(), remoteHost, remotePort, defaults.bindHost(), defaults.bindPort());
-        if (tunnel == null) {
+        boolean moved = tunnel != null && (!tunnel.sshHost().equals(sshHost)
+                || !tunnel.remoteHost().equals(remoteHost) || tunnel.remotePort() != remotePort);
+        if (moved && tunnel.started()) {
+            throw new IllegalStateException("DB 터널이 이미 열려 있습니다. 에이전트를 다시 실행하면 새 클라우드 DB 로 붙습니다");
+        }
+        if (tunnel == null || moved) {
             tunnel = new DatabaseTunnel(settings, commands, key.getParent());
             if (resumed != null) {
                 tunnel.resumeFor(resumed);

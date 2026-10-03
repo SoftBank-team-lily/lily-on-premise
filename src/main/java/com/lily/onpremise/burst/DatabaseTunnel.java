@@ -127,6 +127,22 @@ public class DatabaseTunnel {
         });
     }
 
+    public boolean started() {
+        return wanted;
+    }
+
+    public String sshHost() {
+        return settings.sshHost();
+    }
+
+    public String remoteHost() {
+        return settings.remoteHost();
+    }
+
+    public int remotePort() {
+        return settings.remotePort();
+    }
+
     public String host() {
         return settings.bindHost();
     }

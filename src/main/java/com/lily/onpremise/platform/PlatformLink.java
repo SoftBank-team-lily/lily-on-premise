@@ -123,6 +123,47 @@ public class PlatformLink {
         });
     }
 
+    /**
+     * 이 앱의 클라우드(GCP) Ingress·CNAME·DB 터널로 바꾼다. Cloudflare 터널은 다시 만들지 않고, 거점 복구도 하지 않는다.
+     */
+    public void cloudTarget(JsonNode message) {
+        JsonNode db = message.path("database");
+        if (platformDatabase() instanceof PlatformDatabase platformDb && db.isObject()) {
+            try {
+                platformDb.configure(
+                        db.path("sshHost").asText(),
+                        db.path("sshUser").asText("lily-tunnel"),
+                        db.path("remoteHost").asText(),
+                        db.path("remotePort").asInt(5432),
+                        db.path("certificate").asText());
+                log.info("platform db tunnel retargeted: {}", db.path("remoteHost").asText());
+                if (databases instanceof DatabaseModes modes && db.hasNonNull("reverseHost")
+                        && db.path("reversePort").asInt(0) > 0) {
+                    modes.reverse().configure(new ReverseTunnel.Settings(
+                            db.path("sshHost").asText(), db.path("sshUser").asText("lily-tunnel"),
+                            platformDb.key(), platformDb.knownHosts(),
+                            db.path("reverseHost").asText(), db.path("reversePort").asInt()));
+                }
+            } catch (RuntimeException e) {
+                log.warn("platform db tunnel retarget rejected: {}", e.getMessage());
+            }
+        }
+        JsonNode cloud = message.path("burst");
+        if (cloud.isObject() && properties.platformExposure()) {
+            try {
+                RelayBurstClient relay = new RelayBurstClient(channel, json);
+                burst.getObject().platform(relay, cloud.path("ingressHost").asText(""),
+                        cloud.path("ingressPort").asInt(80), "");
+                cutover.getObject().platform(relay, cloud.path("ingressHost").asText(""),
+                        cloud.path("ingressPort").asInt(80), cloud.path("cloudOrigin").asText(""));
+                log.info("platform burst retargeted: ingress={}:{}", cloud.path("ingressHost").asText(""),
+                        cloud.path("ingressPort").asInt(80));
+            } catch (RuntimeException e) {
+                log.warn("platform burst retarget rejected: {}", e.getMessage());
+            }
+        }
+    }
+
     /** 버스팅과 거점 전환이 builder 를 이 소켓으로 부르게 하고, 거점을 DNS 로 복구한다 */
     private void attachBurst(JsonNode cloud, String zoneName) {
         try {

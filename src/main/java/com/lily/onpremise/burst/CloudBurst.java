@@ -147,7 +147,9 @@ public class CloudBurst implements BurstGate {
         this.client = relay;
         this.ingressHost = ingressHost == null ? "" : ingressHost;
         this.ingressPort = ingressPort;
-        this.platformZone = zoneName == null ? "" : zoneName.trim().toLowerCase();
+        if (zoneName != null && !zoneName.isBlank()) {
+            this.platformZone = zoneName.trim().toLowerCase();
+        }
         event("platform: target=" + this.ingressHost + ":" + ingressPort);
     }
 
