@@ -32,6 +32,9 @@ public class DatabaseTunnel {
     /** ensure 가 한 번 성공한 뒤부터 감시한다 */
     private volatile boolean wanted;
     private Thread supervisor;
+    /** 지금 띄운 ssh 를 끈다 ({@link #close}) */
+    private Runnable stop = () -> {
+    };
 
     public DatabaseTunnel(AgentProperties.Database settings, Commands commands, Path workDir) {
         this(settings, commands, workDir, CHECK_MILLIS);
@@ -52,7 +55,7 @@ public class DatabaseTunnel {
         }
         String forward = settings.bindHost() + ":" + settings.bindPort() + ":"
                 + settings.remoteHost() + ":" + settings.remotePort();
-        commands.start(List.of("ssh", "-N",
+        stop = commands.startStoppable(List.of("ssh", "-N",
                 "-o", "ExitOnForwardFailure=yes",
                 // 끊긴 연결을 30초 안에 알아채고 ssh 가 끝나야 감시가 다시 연다 (끝나기 전에는 로컬 포트가 열려 있다)
                 "-o", "ServerAliveInterval=10",
@@ -103,6 +106,30 @@ public class DatabaseTunnel {
                 ensure();
             } catch (RuntimeException e) {
                 log.warn("db tunnel reopen failed: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 감시를 멈추고 ssh 를 끈다. 같은 로컬 포트로 다른 배스천·DB 에 다시 열 때 (GCP 배포의 cloud-target).
+     * 포트가 닫힐 때까지 잠깐 기다린다. 열려 있으면 새 터널의 ensure 가 옛 ssh 를 새 터널로 착각한다
+     */
+    public synchronized void close() {
+        wanted = false;
+        if (supervisor != null) {
+            supervisor.interrupt();
+            supervisor = null;
+        }
+        stop.run();
+        stop = () -> {
+        };
+        long deadline = System.currentTimeMillis() + 3_000;
+        while (open() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
             }
         }
     }

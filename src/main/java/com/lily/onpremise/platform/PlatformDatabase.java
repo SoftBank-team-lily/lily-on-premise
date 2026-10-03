@@ -5,6 +5,8 @@ import com.lily.onpremise.config.AgentProperties;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.pipeline.DatabaseAccess;
 import com.lily.onpremise.system.Commands;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -21,6 +23,8 @@ import java.util.Map;
  * <p>DB 계정은 컨트롤 플레인이 잡의 {@code databaseEnv} 에 실어 보낸다 (터널 주소 기준).
  */
 public final class PlatformDatabase implements DatabaseAccess {
+
+    private static final Logger log = LoggerFactory.getLogger(PlatformDatabase.class);
 
     private final Commands commands;
     private final AgentProperties.Database defaults;
@@ -67,8 +71,12 @@ public final class PlatformDatabase implements DatabaseAccess {
                 sshHost, sshUser, key.toString(), remoteHost, remotePort, defaults.bindHost(), defaults.bindPort());
         boolean moved = tunnel != null && (!tunnel.sshHost().equals(sshHost)
                 || !tunnel.remoteHost().equals(remoteHost) || tunnel.remotePort() != remotePort);
-        if (moved && tunnel.started()) {
-            throw new IllegalStateException("DB 터널이 이미 열려 있습니다. 에이전트를 다시 실행하면 새 클라우드 DB 로 붙습니다");
+        // 다른 클라우드(GCP 배포의 cloud-target)로 바뀌면 열린 터널을 닫고 같은 로컬 포트로 새 대상에 다시 연다.
+        // 에이전트 하나는 앱 하나라 이 터널을 쓰는 앱이 곧 새 클라우드로 배포하는 앱이다
+        boolean reopen = moved && tunnel.started();
+        if (moved) {
+            tunnel.close();
+            log.info("platform db tunnel moved: {} -> {}:{} via {}", tunnel.remoteHost(), remoteHost, remotePort, sshHost);
         }
         if (tunnel == null || moved) {
             tunnel = new DatabaseTunnel(settings, commands, key.getParent());
@@ -76,6 +84,16 @@ public final class PlatformDatabase implements DatabaseAccess {
                 tunnel.resumeFor(resumed);
                 resumed = null;
             }
+        }
+        if (reopen) {
+            DatabaseTunnel next = tunnel;
+            Thread.ofVirtual().name("lily-db-tunnel-move").start(() -> {
+                try {
+                    next.ensure();
+                } catch (RuntimeException e) {
+                    log.warn("db tunnel reopen after move failed: {}", e.getMessage());
+                }
+            });
         }
     }
 

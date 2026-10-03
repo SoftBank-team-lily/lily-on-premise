@@ -59,6 +59,11 @@ public final class ProcessCommands implements Commands {
 
     @Override
     public void start(List<String> command, java.util.function.Consumer<String> lines) {
+        startStoppable(command, lines);
+    }
+
+    @Override
+    public Runnable startStoppable(List<String> command, java.util.function.Consumer<String> lines) {
         Process process = startProcess(command, null);
         background.add(process);
         Thread thread = Thread.ofPlatform().daemon(true).name("lily-proc").unstarted(() -> {
@@ -73,6 +78,10 @@ public final class ProcessCommands implements Commands {
             }
         });
         thread.start();
+        return () -> {
+            background.remove(process);
+            process.destroyForcibly();
+        };
     }
 
     @Override
