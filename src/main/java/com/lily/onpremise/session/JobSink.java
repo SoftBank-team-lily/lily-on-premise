@@ -25,4 +25,14 @@ public interface JobSink {
      * @param database true 면 이 PC 의 DB 컨테이너에 있는 앱 DB 와 계정도 지운다. 사용자가 준 외부 DB 는 건드리지 않는다
      */
     JobRecord remove(String app, String id, boolean database);
+
+    /**
+     * 진행 중인 배포를 멈춘다. 트래픽을 새 슬롯으로 바꾸기 전이면 후보를 지우고 CANCELLED 로 끝난다.
+     * 아직 오지 않은 잡 id 면 기억했다가 그 잡이 오면 바로 CANCELLED 로 끝낸다
+     *
+     * @return 받았으면 참. 이미 트래픽을 바꾼 잡이면 거짓
+     */
+    default boolean cancel(String id) {
+        return false;
+    }
 }

@@ -3,6 +3,7 @@ package com.lily.onpremise;
 import com.lily.onpremise.burst.CloudBurst;
 import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.job.DeployJob;
+import com.lily.onpremise.job.JobCancels;
 import com.lily.onpremise.job.JobRecord;
 import com.lily.onpremise.job.JobStore;
 import com.lily.onpremise.pipeline.OnPremPipeline;
@@ -29,10 +30,12 @@ public class AgentService implements JobSink {
     private final CloudBurst burst;
     private final HomeCutover cutover;
     private final AppRemoval removal;
+    private final JobCancels cancels;
     private final Object gate = new Object();
 
     public AgentService(JobStore store, OnPremPipeline pipeline, ControlSession session, JobRunner runner,
-                        CloudBurst burst, HomeCutover cutover, AppRemoval removal) {
+                        CloudBurst burst, HomeCutover cutover, AppRemoval removal, JobCancels cancels) {
+        this.cancels = cancels;
         this.store = store;
         this.pipeline = pipeline;
         this.session = session;
@@ -54,7 +57,12 @@ public class AgentService implements JobSink {
         publish(record);
         runner.run(() -> {
             synchronized (gate) {
-                pipeline.execute(record, job, this::publish);
+                cancels.begin(job.id());
+                try {
+                    pipeline.execute(record, job, this::publish);
+                } finally {
+                    cancels.end(job.id());
+                }
             }
             if (record.getStatus() == JobRecord.Status.SUCCEEDED) {
                 // 클라우드 버스팅이 켜져 있으면 같은 앱을 클라우드에 대기 배포한다
@@ -158,6 +166,11 @@ public class AgentService implements JobSink {
             }
         });
         return record;
+    }
+
+    @Override
+    public boolean cancel(String id) {
+        return cancels.request(id);
     }
 
     public HomeCutover.Status homeStatus() {

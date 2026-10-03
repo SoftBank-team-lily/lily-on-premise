@@ -49,6 +49,7 @@ public final class OnPremPipeline {
     private final CandidateJudge judge;
     private final DeployedApp deployed;
     private final PgrollStep pgroll;
+    private final JobCancel cancel;
 
     public OnPremPipeline(
             Workspace workspace,
@@ -129,6 +130,27 @@ public final class OnPremPipeline {
             CandidateJudge judge,
             DeployedApp deployed,
             PgrollStep pgroll) {
+        this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
+                databases, schema, judge, deployed, pgroll, JobCancel.NONE);
+    }
+
+    public OnPremPipeline(
+            Workspace workspace,
+            StackAnalyzer analyzer,
+            ContainerRuntime runtime,
+            Readiness readiness,
+            TrafficSwitch traffic,
+            PublicAddress addresses,
+            SlotBook slots,
+            int bluePort,
+            int greenPort,
+            DatabaseAccess databases,
+            SchemaApply schema,
+            CandidateJudge judge,
+            DeployedApp deployed,
+            PgrollStep pgroll,
+            JobCancel cancel) {
+        this.cancel = cancel == null ? JobCancel.NONE : cancel;
         this.pgroll = pgroll == null ? PgrollStep.NONE : pgroll;
         this.databases = databases;
         this.schema = schema == null ? SchemaApply.NONE : schema;
@@ -145,14 +167,25 @@ public final class OnPremPipeline {
         this.greenPort = greenPort;
     }
 
+    /**
+     * 취소({@link JobCancel})는 단계 사이에서 멈추거나, 기다리던 git·docker·헬스 대기를 끊어서 실패처럼 빠져나온다.
+     * 어느 쪽이든 취소를 받은 잡은 CANCELLED 로 남긴다. 트래픽을 바꾼 뒤에는 취소를 받지 않는다
+     */
     public void execute(JobRecord record, DeployJob job, Consumer<JobRecord> publish) {
         try {
+            cancel.check(job.id());
             run(record, job, publish);
         } catch (RuntimeException e) {
-            log.warn("job failed: id={} app={} reason={}", job.id(), job.appName(), e.getMessage());
-            if (record.getStatus() != JobRecord.Status.SUCCEEDED) {
-                stage(record, publish, JobRecord.Status.FAILED, "failed: " + safe(e.getMessage()));
+            if (record.getStatus() == JobRecord.Status.SUCCEEDED) {
+                return;
             }
+            if (cancel.requested(job.id())) {
+                log.info("job cancelled: id={} app={} at={}", job.id(), job.appName(), e.getMessage());
+                stage(record, publish, JobRecord.Status.CANCELLED, "cancelled: " + safe(e.getMessage()));
+                return;
+            }
+            log.warn("job failed: id={} app={} reason={}", job.id(), job.appName(), e.getMessage());
+            stage(record, publish, JobRecord.Status.FAILED, "failed: " + safe(e.getMessage()));
         }
     }
 
@@ -177,8 +210,10 @@ public final class OnPremPipeline {
                         + " health=" + health);
 
         String image = "lily-onprem/" + job.appName() + ":" + job.id();
+        cancel.check(job.id());
         stage(record, publish, JobRecord.Status.BUILDING, "build: " + image);
         runtime.build(context, image, plan.origin() == DockerfilePlan.Origin.GENERATED);
+        cancel.check(job.id());
 
         // 공개 주소가 보고 있는 포트에는 후보를 올리지 않는다. 헬스가 끝나기 전에 트래픽이 들어간다.
         int upstream = traffic.upstreamPort();
@@ -209,6 +244,8 @@ public final class OnPremPipeline {
         env.put("APP_COLOR", target.name().toLowerCase());
         env.put("APP_VERSION", job.id());
 
+        // 스키마를 바꾸기 전 마지막 확인. 이후에는 후보를 띄운 뒤의 확인({@link JobCancel#commit})에서 되돌린다
+        cancel.check(job.id());
         boolean schemaApplied = false;
         // 이번 잡이 시작한 pgroll 마이그레이션. 전환 전에 실패하면 되돌린다
         String pgrollMigration = null;
@@ -280,6 +317,11 @@ public final class OnPremPipeline {
         } catch (RuntimeException e) {
             runtime.stop(name);
             throw new IllegalStateException("hostname failed, candidate removed: " + safe(e.getMessage()) + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
+        }
+        if (!cancel.commit(job.id())) {
+            runtime.stop(name);
+            throw new IllegalStateException("before switch, traffic unchanged, candidate removed"
+                    + schemaNote(job, schemaApplied, pgrollMigration, agentEnv));
         }
         stage(record, publish, JobRecord.Status.SWITCHING,
                 "switch: " + target.name().toLowerCase() + " host=" + published);

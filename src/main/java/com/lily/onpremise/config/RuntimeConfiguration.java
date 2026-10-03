@@ -41,6 +41,7 @@ import com.lily.onpremise.source.GitWorkspace;
 import com.lily.onpremise.source.Workspace;
 import com.lily.onpremise.system.Commands;
 import com.lily.onpremise.system.ProcessCommands;
+import com.lily.onpremise.job.JobCancels;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
@@ -56,6 +57,11 @@ public class RuntimeConfiguration {
     @Bean(destroyMethod = "close")
     Commands commands() {
         return new ProcessCommands();
+    }
+
+    @Bean
+    JobCancels jobCancels(Commands commands) {
+        return new JobCancels(commands);
     }
 
     @Bean
@@ -245,9 +251,10 @@ public class RuntimeConfiguration {
             SchemaApply schema,
             CandidateJudge judge,
             HomeCutover homes,
-            AgentPgroll pgroll) {
+            AgentPgroll pgroll,
+            JobCancels cancels) {
         return new OnPremPipeline(
                 workspace, analyzer, runtime, readiness, exposure, publicAddress, slots,
-                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes, pgroll);
+                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes, pgroll, cancels);
     }
 }
