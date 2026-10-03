@@ -35,6 +35,22 @@ class SlotRecoveryTest {
     }
 
     @Test
+    void 다시_붙인_슬롯의_환경변수로_지금_스키마를_알려_주지만_롤백_기록은_만들지_않는다() {
+        recovery("burst-demo-blue\t127.0.0.1:18080->8080/tcp\n", Set.of(18080)).recover();
+
+        assertThat(slots.liveRelease("burst-demo")).hasValueSatisfying(release -> {
+            assertThat(release.slot()).isEqualTo("blue");
+            assertThat(release.env()).containsEntry("LILY_DB_SCHEMA", "public_02_add_slug");
+        });
+        assertThat(slots.currentRelease("burst-demo")).isEmpty();
+        assertThat(slots.previousRelease("burst-demo")).isEmpty();
+
+        slots.published(new SlotBook.Release("burst-demo", "green", "img:2", 18081, 8080, "/", Map.of()));
+        assertThat(slots.liveRelease("burst-demo")).hasValueSatisfying(r -> assertThat(r.slot()).isEqualTo("green"));
+        assertThat(slots.previousRelease("burst-demo")).isEmpty();
+    }
+
+    @Test
     void 두_슬롯이_다_떠_있으면_요청을_받는_새_쪽을_붙인다() {
         SlotRecovery recovery = recovery("""
                 shop-green\t127.0.0.1:18081->3000/tcp
@@ -73,7 +89,7 @@ class SlotRecoveryTest {
 
             @Override
             public String output(List<String> command) {
-                return command.get(1).equals("inspect") ? "DB_URL=jdbc:postgresql://172.17.0.1:15432/p_x\nPATH=/bin\n" : ps;
+                return command.get(1).equals("inspect") ? "DB_URL=jdbc:postgresql://172.17.0.1:15432/p_x\nLILY_DB_SCHEMA=public_02_add_slug\nPATH=/bin\n" : ps;
             }
 
             @Override
