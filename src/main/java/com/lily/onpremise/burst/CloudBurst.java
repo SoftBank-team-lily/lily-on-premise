@@ -185,6 +185,10 @@ public class CloudBurst implements BurstGate {
             event("skip: 거점을 옮기는 중이라 버스팅을 " + (on ? "켜지" : "끄지") + " 않아요");
             return;
         }
+        if (on && job != null && job.onPremOnly()) {
+            event("skip: 온프레미스 전용이라 버스팅을 켜지 않아요");
+            return;
+        }
         if (on && !scaleGate.getAsBoolean()) {
             // 공개 주소가 클라우드를 보는 동안 대기 배포를 하면 끝날 때 그 클라우드 Pod 를 0 으로 내린다
             event("skip: 공개 주소가 클라우드라 버스팅을 켜지 않아요");
@@ -325,6 +329,12 @@ public class CloudBurst implements BurstGate {
     public void onDeployed(DeployJob job) {
         pendingRecover = null;
         lastJob = job;
+        if (job.onPremOnly()) {
+            enabled = false;
+            proxy.clearOverflow();
+            event("skip: 온프레미스 전용이라 클라우드 대기 배포를 하지 않아요");
+            return;
+        }
         if (!enabled) {
             return;
         }
@@ -359,9 +369,11 @@ public class CloudBurst implements BurstGate {
     public Status status() {
         UpstreamProxy.Pressure pressure = proxy.pressure();
         synchronized (events) {
+            DeployJob job = lastJob;
             return new Status(enabled, available(), cloudPercent, phase, phaseSince, standbyBuild, appName, host, warm,
                     pressure,
-                    List.copyOf(events));
+                    List.copyOf(events),
+                    job == null ? "HYBRID" : job.deploymentModeOrDefault());
         }
     }
 
@@ -633,6 +645,7 @@ public class CloudBurst implements BurstGate {
      */
     public record Status(boolean enabled, boolean available, int cloudPercent, Phase phase, long phaseSince,
                          String standbyBuild, String appName,
-                         String publicHost, boolean warm, UpstreamProxy.Pressure pressure, List<String> events) {
+                         String publicHost, boolean warm, UpstreamProxy.Pressure pressure, List<String> events,
+                         String deploymentMode) {
     }
 }

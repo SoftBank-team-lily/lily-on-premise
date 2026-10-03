@@ -23,6 +23,22 @@ class CloudBurstTest {
     private final long t0 = System.currentTimeMillis();
 
     @Test
+    void 온프레미스_전용은_대기_배포와_스케일을_호출하지_않는다() throws Exception {
+        CloudBurst burst = new CloudBurst(settings(1), null, proxy, client, (ingress, host) -> podReachable);
+        DeployJob job = new DeployJob("j1", "https://github.com/a/b", "main", null, "blog", 8080,
+                "/health", null, null, Map.of()).withDeploymentMode("ONPREM_ONLY");
+
+        burst.onDeployed(job);
+        Thread.sleep(50);
+        burst.tick(idle(), at(1));
+
+        assertThat(client.standbys).isEmpty();
+        assertThat(client.scales).isEmpty();
+        assertThat(burst.status().enabled()).isFalse();
+        assertThat(burst.status().deploymentMode()).isEqualTo("ONPREM_ONLY");
+    }
+
+    @Test
     void 대기_배포가_끝나면_대기_Pod_를_띄우고_닿으면_바로_넘김을_켠다() throws Exception {
         CloudBurst burst = deployed(1);
 

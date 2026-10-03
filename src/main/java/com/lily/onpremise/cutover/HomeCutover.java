@@ -339,12 +339,13 @@ public final class HomeCutover implements DeployedApp {
         DeployJob current = job;
         String mode = current == null || current.database() == null ? "" : current.databaseModeOrDefault();
         return new Status(phase.name(), appName, hostOf(appName), cnameContent, already, copyEvents(), mode,
-                databaseMovable(current), steps, step, stepSince, stepBuild, cancellable && !cancelRequested);
+                databaseMovable(current), steps, step, stepSince, stepBuild, cancellable && !cancelRequested,
+                current == null ? "HYBRID" : current.deploymentModeOrDefault());
     }
 
     /** 이 앱 DB 를 거점과 같이 옮길 수 있다 (postgres, 내 PC 또는 RDS) */
     private boolean databaseMovable(DeployJob current) {
-        return databaseMove != null && current != null && "postgres".equals(current.database())
+        return databaseMove != null && current != null && !current.onPremOnly() && "postgres".equals(current.database())
                 && ("local".equals(current.databaseModeOrDefault()) || "cloud".equals(current.databaseModeOrDefault()));
     }
 
@@ -360,6 +361,9 @@ public final class HomeCutover implements DeployedApp {
      * @param migrateDatabase 클라우드로: 내 PC DB → RDS, 온프레미스로: RDS → 내 PC DB 로 옮기면서 전환한다
      */
     public synchronized Status begin(String app, String target, boolean migrateDatabase) {
+        if (job != null && job.onPremOnly()) {
+            throw new IllegalArgumentException("온프레미스 전용은 거점을 바꾸지 않습니다");
+        }
         Place want = place(target);
         if (phase == Phase.MOVING_TO_CLOUD || phase == Phase.MOVING_TO_ONPREM) {
             throw new IllegalArgumentException("이미 전환 중입니다");
@@ -923,6 +927,7 @@ public final class HomeCutover implements DeployedApp {
      */
     public record Status(String phase, String appName, String publicHost, String cname, boolean already,
                          List<String> events, String databaseMode, boolean databaseMovable,
-                         List<String> steps, String step, long stepSince, String stepBuild, boolean cancellable) {
+                         List<String> steps, String step, long stepSince, String stepBuild, boolean cancellable,
+                         String deploymentMode) {
     }
 }

@@ -83,13 +83,13 @@ public final class DatabaseModes implements DatabaseAccess {
                 if (job.importsDatabase()) {
                     importFromCloud(job);
                 }
-                open(job.appName(), new ExternalDatabase.Resolved(db, db));
+                open(job.appName(), new ExternalDatabase.Resolved(db, db), !job.onPremOnly());
                 yield db.env();
             }
             case "external" -> {
                 ExternalDatabase.Resolved db = external.resolve(engine, job.databaseUrl());
                 external.check(db.agent());
-                open(job.appName(), db);
+                open(job.appName(), db, !job.onPremOnly());
                 yield db.app().env();
             }
             default -> {
@@ -148,8 +148,12 @@ public final class DatabaseModes implements DatabaseAccess {
         return Optional.of(db.app().at(settings.reverseHost(), settings.reversePort()).env());
     }
 
-    private void open(String appName, ExternalDatabase.Resolved db) {
+    private void open(String appName, ExternalDatabase.Resolved db, boolean shareWithCloud) {
         onPrem.put(appName, db);
+        if (!shareWithCloud) {
+            log.info("on-prem only: {} stays on this pc", appName);
+            return;
+        }
         if (reverse.settings() == null) {
             log.info("reverse tunnel not offered by platform: {} stays local only", appName);
             return;
