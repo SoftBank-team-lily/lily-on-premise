@@ -37,7 +37,18 @@ public record DeployJob(
          * local 일 때 클라우드 RDS 의 데이터를 이 PC DB 로 옮긴 뒤 띄운다 (클라우드 앱을 이 PC 로 옮길 때).
          * RDS 접속 정보는 databaseEnv (터널 주소 기준). postgres 만
          */
-        Boolean importDatabase) {
+        Boolean importDatabase,
+        /** HYBRID(기본) 또는 ONPREM_ONLY. 비우면 HYBRID */
+        String deploymentMode) {
+
+    /** 배포 모드는 HYBRID */
+    public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
+                     String healthPath, String rootDir, String dockerfile, Map<String, String> env, String database,
+                     String canaryPath, Map<String, String> migrations, Map<String, String> databaseEnv,
+                     String databaseMode, String databaseUrl, Boolean importDatabase) {
+        this(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env, database,
+                canaryPath, migrations, databaseEnv, databaseMode, databaseUrl, importDatabase, null);
+    }
 
     /** RDS 데이터를 옮기지 않는 잡 */
     public DeployJob(String id, String repoUrl, String branch, String token, String appName, Integer targetPort,
@@ -81,6 +92,20 @@ public record DeployJob(
         return databaseMode == null || databaseMode.isBlank() ? "cloud" : databaseMode;
     }
 
+    /** 배포 모드. 비우면 HYBRID */
+    public String deploymentModeOrDefault() {
+        return "ONPREM_ONLY".equals(deploymentMode) ? "ONPREM_ONLY" : "HYBRID";
+    }
+
+    public boolean onPremOnly() {
+        return "ONPREM_ONLY".equals(deploymentModeOrDefault());
+    }
+
+    public DeployJob withDeploymentMode(String mode) {
+        return new DeployJob(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env,
+                database, canaryPath, migrations, databaseEnv, databaseMode, databaseUrl, importDatabase, mode);
+    }
+
     /**
      * 같은 잡을 다른 DB 위치로. 거점 전환이 DB 를 옮긴 뒤의 잡이다
      *
@@ -91,7 +116,7 @@ public record DeployJob(
     public DeployJob withDatabase(String databaseMode, Map<String, String> databaseEnv, boolean importDatabase) {
         return new DeployJob(id, repoUrl, branch, token, appName, targetPort, healthPath, rootDir, dockerfile, env,
                 database, canaryPath, migrations, databaseEnv, "cloud".equals(databaseMode) ? null : databaseMode,
-                null, importDatabase ? Boolean.TRUE : null);
+                null, importDatabase ? Boolean.TRUE : null, deploymentMode);
     }
 
     /** 이 PC DB 를 띄우기 전에 클라우드 RDS 의 데이터를 옮긴다 */
@@ -104,6 +129,7 @@ public record DeployJob(
     public String toString() {
         return "DeployJob[id=" + id + ", appName=" + appName + ", repoUrl=" + repoUrl + ", branch=" + branch
                 + ", database=" + database + ", databaseMode=" + databaseMode
+                + ", deploymentMode=" + deploymentModeOrDefault()
                 + (importsDatabase() ? ", importDatabase=true" : "") + "]";
     }
 
@@ -173,6 +199,20 @@ public record DeployJob(
         } else {
             url = null;
         }
+        String deployMode = blankToNull(deploymentMode);
+        if (deployMode != null && !"HYBRID".equals(deployMode) && !"ONPREM_ONLY".equals(deployMode)) {
+            throw new IllegalArgumentException("deploymentMode 는 HYBRID 또는 ONPREM_ONLY 입니다");
+        }
+        if ("ONPREM_ONLY".equals(deployMode)) {
+            if ("external".equals(mode) || Boolean.TRUE.equals(importDatabase)) {
+                throw new IllegalArgumentException("온프레미스 전용은 내 PC 의 DB 만 씁니다");
+            }
+            if (engine != null) {
+                mode = "local";
+            }
+        } else {
+            deployMode = null;
+        }
         boolean importing = Boolean.TRUE.equals(importDatabase);
         if (importing) {
             if (!"local".equals(mode) || !"postgres".equals(engine)) {
@@ -201,10 +241,11 @@ public record DeployJob(
                 engine,
                 canary,
                 cleanMigrations(migrations),
-                cleanEnv(databaseEnv),
+                "ONPREM_ONLY".equals(deployMode) ? null : cleanEnv(databaseEnv),
                 engine == null || "cloud".equals(mode) ? null : mode,
                 url,
-                importing ? Boolean.TRUE : null);
+                importing ? Boolean.TRUE : null,
+                deployMode);
     }
 
     private static URI parseRepo(String repo) {

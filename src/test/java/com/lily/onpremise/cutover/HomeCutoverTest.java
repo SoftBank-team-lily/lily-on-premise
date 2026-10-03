@@ -268,6 +268,15 @@ class HomeCutoverTest {
     }
 
     @Test
+    void 온프레미스_전용은_거점_전환_전에_거절하고_DNS와_대기_배포를_호출하지_않는다() {
+        cutover.note(job("job1", "postgres", "FROM scratch\n").withDeploymentMode("ONPREM_ONLY"), true);
+
+        assertThatThrownBy(() -> cutover.begin("blog", "cloud")).hasMessageContaining("온프레미스 전용");
+        assertThat(api.puts).isEmpty();
+        assertThat(client.standbys).isEmpty();
+    }
+
+    @Test
     void Dockerfile_이_없으면_CNAME_을_호출하지_않는다() {
         cutover.note(job("job1", "postgres", null), false);
 

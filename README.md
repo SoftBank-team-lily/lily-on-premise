@@ -760,6 +760,12 @@ DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를
 - 역방향 터널이 없으면 `local`·`external` 앱의 클라우드 대기 배포는 하지 않는다
 - DB 가 이 PC 에 있으면 PC 가 꺼질 때 DB 도 꺼져 클라우드가 이어받지 못한다
 
+### 온프레미스 전용 (`deploymentMode=ONPREM_ONLY`)
+
+요청 경로와 데이터 경로에 AWS 가 없다. DB 는 위 `local` 과 같은 `lily-postgres` 컨테이너와 named volume `lily-postgres-data` 다. 앱마다 database 와 계정을 만들고, 비밀번호는 이 PC 의 환경변수로만 넘긴다. 빌더는 RDS 프로비저너를 부르지 않고, `ssh -L` 과 역방향 터널도 열지 않는다. 블루그린은 같은 로컬 DB 를 다시 쓴다.
+
+버스팅, 웜 스탠바이, 거점 전환은 거절한다. PC 가 꺼지면 서비스가 멈춘다. TLS 는 Cloudflare 에서 끝나고, 터널 안은 HTTP 다. 백업과 볼륨 보관은 사용자 책임이다. 컨테이너는 기존과 같이 host 네트워크로 `127.0.0.1:25432`·`172.17.0.1` 만 연다. 하이브리드의 `local` 과 컨테이너를 공유하므로 포트를 바꾸지 않는다.
+
 ### 스키마 변경 (pgroll)
 
 PostgreSQL 앱의 `migrations` 가 pgroll 파일(`01_create_posts.yaml`)이면 Flyway 대신 pgroll 로 expand/contract 합니다. 규칙은 클라우드(lily-cicd)와 같습니다.
