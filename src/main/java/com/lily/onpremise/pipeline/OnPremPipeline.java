@@ -7,6 +7,8 @@ import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
 import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.schema.SchemaApply;
+import com.lily.onpremise.schema.pgroll.PgrollEnv;
+import com.lily.onpremise.schema.pgroll.PgrollSet;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobRecord;
 import com.lily.onpremise.runtime.ContainerRuntime;
@@ -46,6 +48,7 @@ public final class OnPremPipeline {
     private final SchemaApply schema;
     private final CandidateJudge judge;
     private final DeployedApp deployed;
+    private final PgrollStep pgroll;
 
     public OnPremPipeline(
             Workspace workspace,
@@ -107,6 +110,26 @@ public final class OnPremPipeline {
             SchemaApply schema,
             CandidateJudge judge,
             DeployedApp deployed) {
+        this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
+                databases, schema, judge, deployed, PgrollStep.NONE);
+    }
+
+    public OnPremPipeline(
+            Workspace workspace,
+            StackAnalyzer analyzer,
+            ContainerRuntime runtime,
+            Readiness readiness,
+            TrafficSwitch traffic,
+            PublicAddress addresses,
+            SlotBook slots,
+            int bluePort,
+            int greenPort,
+            DatabaseAccess databases,
+            SchemaApply schema,
+            CandidateJudge judge,
+            DeployedApp deployed,
+            PgrollStep pgroll) {
+        this.pgroll = pgroll == null ? PgrollStep.NONE : pgroll;
         this.databases = databases;
         this.schema = schema == null ? SchemaApply.NONE : schema;
         this.judge = judge == null ? CandidateJudge.PASS : judge;
@@ -187,15 +210,39 @@ public final class OnPremPipeline {
         env.put("APP_VERSION", job.id());
 
         boolean schemaApplied = false;
+        // 이번 잡이 시작한 pgroll 마이그레이션. 전환 전에 실패하면 되돌린다
+        String pgrollMigration = null;
+        Map<String, String> agentEnv = job.database() == null ? Map.of() : databases.agentEnv(job, env);
         if (job.migrations() != null && !job.migrations().isEmpty()) {
             if (job.database() == null) {
                 throw new IllegalStateException("migrations 가 있는데 database 가 없다");
             }
-            stage(record, publish, JobRecord.Status.STARTING, "schema: " + job.migrations().size() + " files");
-            schema.apply(databases.agentEnv(job, env), job.migrations());
-            schemaApplied = true;
+            if (pgroll.handles(job.migrations())) {
+                stage(record, publish, JobRecord.Status.STARTING, "schema: pgroll " + job.migrations().size() + " files");
+                PgrollStep.Started started = pgroll.start(job, agentEnv, upstream > 0);
+                for (String line : started.logs()) {
+                    stage(record, publish, JobRecord.Status.STARTING, line);
+                }
+                if (started.started()) {
+                    pgrollMigration = started.migration();
+                }
+                env = new LinkedHashMap<>(PgrollEnv.withSchema(env, PgrollSet.versionSchema(started.migration())));
+            } else {
+                stage(record, publish, JobRecord.Status.STARTING, "schema: " + job.migrations().size() + " files");
+                schema.apply(agentEnv, job.migrations());
+                schemaApplied = true;
+            }
             // 앱이 같은 스크립트를 다시 실행하지 않게 한다. 클라우드 배포와 같은 키다
             env.put("SPRING_FLYWAY_ENABLED", "false");
+        } else if ("postgres".equals(job.database())) {
+            // 마이그레이션 파일이 없는 커밋도 pgroll 로 관리하던 DB 면 최신 버전 스키마로 붙는다
+            Optional<String> latest = pgroll.latest(agentEnv);
+            if (latest.isPresent()) {
+                env = new LinkedHashMap<>(PgrollEnv.withSchema(env, PgrollSet.versionSchema(latest.get())));
+                env.put("SPRING_FLYWAY_ENABLED", "false");
+                stage(record, publish, JobRecord.Status.STARTING,
+                        "schema: pgroll 관리 DB, " + PgrollSet.versionSchema(latest.get()) + " 로 접속");
+            }
         }
 
         stage(record, publish, JobRecord.Status.STARTING, "start: " + name + " 127.0.0.1:" + port);
@@ -206,7 +253,7 @@ public final class OnPremPipeline {
             readiness.await(port, health);
         } catch (RuntimeException e) {
             runtime.stop(name);
-            throw new IllegalStateException(withSchema("health failed, traffic unchanged: " + safe(e.getMessage()), schemaApplied), e);
+            throw new IllegalStateException("health failed, traffic unchanged: " + safe(e.getMessage()) + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
         }
 
         // 첫 배포(upstream 0)는 비교할 슬롯이 없다. 이전 슬롯이 있을 때만 후보 루프백을 판정한다
@@ -223,7 +270,7 @@ public final class OnPremPipeline {
                 String message = e.getMessage() != null && e.getMessage().contains("traffic unchanged")
                         ? e.getMessage()
                         : "judge failed, traffic unchanged: " + safe(e.getMessage());
-                throw new IllegalStateException(withSchema(message, schemaApplied), e);
+                throw new IllegalStateException(message + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
             }
         }
 
@@ -232,7 +279,7 @@ public final class OnPremPipeline {
             published = addresses.ensure(job.appName());
         } catch (RuntimeException e) {
             runtime.stop(name);
-            throw new IllegalStateException(withSchema("hostname failed, candidate removed: " + safe(e.getMessage()), schemaApplied), e);
+            throw new IllegalStateException("hostname failed, candidate removed: " + safe(e.getMessage()) + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
         }
         stage(record, publish, JobRecord.Status.SWITCHING,
                 "switch: " + target.name().toLowerCase() + " host=" + published);
@@ -240,7 +287,16 @@ public final class OnPremPipeline {
             traffic.route(port);
         } catch (RuntimeException e) {
             runtime.stop(name);
-            throw new IllegalStateException(withSchema("switch failed, candidate removed: " + safe(e.getMessage()), schemaApplied), e);
+            throw new IllegalStateException("switch failed, candidate removed: " + safe(e.getMessage()) + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
+        }
+        if (pgrollMigration != null) {
+            try {
+                pgroll.opened(job.appName(), pgrollMigration, agentEnv);
+                stage(record, publish, JobRecord.Status.SWITCHING, "schema: pgroll 롤백 창 열림 " + pgrollMigration);
+            } catch (RuntimeException e) {
+                // 창 기록이 없으면 다음 배포가 complete 한다. 트래픽은 이미 새 슬롯이다
+                log.warn("pgroll window not recorded: app={} reason={}", job.appName(), e.getMessage());
+            }
         }
         slots.commit(job.appName(), target);
         slots.retain(job.appName());
@@ -285,6 +341,14 @@ public final class OnPremPipeline {
                 .orElseThrow(() -> new IllegalStateException("되돌릴 슬롯이 없다"));
         String name = SlotBook.container(app, Slot.valueOf(previous.slot().toUpperCase()));
         String retire = SlotBook.container(app, Slot.valueOf(current.slot().toUpperCase()));
+        // 현재 릴리스가 pgroll 마이그레이션을 새로 적용했으면 롤백 창 안에서만 되돌린다 (이전 버전 스키마가 그때까지만 있다)
+        String revert = pgrollMigration(current, previous);
+        if (revert != null) {
+            Optional<String> blocked = pgroll.rollbackBlocker(app, revert);
+            if (blocked.isPresent()) {
+                throw new IllegalStateException("rollback refused, traffic unchanged: " + blocked.get());
+            }
+        }
         stage(record, publish, JobRecord.Status.STARTING,
                 "rollback start: " + name + " image=" + previous.image());
         runtime.start(name, previous.image(), previous.hostPort(), previous.containerPort(), previous.env());
@@ -305,10 +369,35 @@ public final class OnPremPipeline {
                 log.warn("previous slot kept running: {}", e.getMessage());
             }
         }
+        String schemaResult = "";
+        if (revert != null) {
+            // 현재 슬롯을 내린 뒤라 새 버전 스키마를 쓰는 컨테이너가 없다
+            try {
+                pgroll.rolledBack(app, revert);
+                stage(record, publish, JobRecord.Status.SWITCHING,
+                        "rollback schema: pgroll rollback " + revert + " (새 버전 스키마 제거, 행 유지)");
+                schemaResult = " schema=reverted";
+            } catch (RuntimeException e) {
+                log.warn("pgroll rollback failed after traffic switch: app={} reason={}", app, e.getMessage());
+                stage(record, publish, JobRecord.Status.SWITCHING,
+                        "rollback schema: pgroll rollback 실패, 앱 롤백은 유지 — " + safe(e.getMessage()));
+                schemaResult = " schema=partial";
+            }
+        }
         String url = traffic.publicUrl();
         record.url(url);
         record.activeSlot(previous.slot());
-        stage(record, publish, JobRecord.Status.SUCCEEDED, "rollback: slot=" + previous.slot());
+        stage(record, publish, JobRecord.Status.SUCCEEDED, "rollback: slot=" + previous.slot() + schemaResult);
+    }
+
+    /** 현재 릴리스가 이전 릴리스와 다른 pgroll 버전 스키마로 붙어 있으면 그 마이그레이션 이름 */
+    private static String pgrollMigration(SlotBook.Release current, SlotBook.Release previous) {
+        String now = current.env() == null ? null : current.env().get(PgrollEnv.SCHEMA_ENV);
+        String before = previous.env() == null ? null : previous.env().get(PgrollEnv.SCHEMA_ENV);
+        if (now == null || now.equals(before) || !now.startsWith("public_")) {
+            return null;
+        }
+        return now.substring("public_".length());
     }
 
     /** tcp 헬스는 5xx 를 볼 경로가 없으므로 클라우드와 같이 / 를 본다 */
@@ -340,8 +429,23 @@ public final class OnPremPipeline {
         }
     }
 
-    private static String withSchema(String message, boolean schemaApplied) {
-        return schemaApplied ? message + ", schema left in place" : message;
+    /**
+     * 전환 전 실패 메시지 뒤에 붙는 스키마 결과. 후보 컨테이너는 이미 내렸다.
+     * 이번 잡이 시작한 pgroll 마이그레이션은 되돌리고, Flyway 스키마는 그대로 둔다
+     */
+    private String schemaNote(DeployJob job, boolean schemaApplied, String pgrollMigration,
+                              Map<String, String> agentEnv) {
+        if (pgrollMigration != null) {
+            try {
+                pgroll.revert(job.appName(), agentEnv, pgrollMigration);
+                return ", schema reverted (pgroll rollback " + pgrollMigration + ")";
+            } catch (RuntimeException e) {
+                log.warn("pgroll revert failed: app={} migration={} reason={}", job.appName(), pgrollMigration,
+                        e.getMessage());
+                return ", schema revert failed (pgroll " + pgrollMigration + " still active): " + safe(e.getMessage());
+            }
+        }
+        return schemaApplied ? ", schema left in place" : "";
     }
 
     private static String safe(String message) {

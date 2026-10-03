@@ -312,7 +312,10 @@ public record DeployJob(
         int bytes = 0;
         for (Map.Entry<String, String> entry : raw.entrySet()) {
             String name = entry.getKey();
-            if (name == null || !name.matches("[VUR][^/\\\\]*__[^/\\\\]*\\.sql") || name.contains("..")) {
+            // Flyway SQL (V/U/R) 또는 pgroll 파일 ({번호}_{설명}.yaml|yml|json). 둘을 섞는지는 파이프라인이 본다
+            boolean flyway = name != null && name.matches("[VUR][^/\\\\]*__[^/\\\\]*\\.sql");
+            boolean pgroll = name != null && name.matches("\\d+_[a-z0-9_]+\\.(ya?ml|json)");
+            if (name == null || !(flyway || pgroll) || name.contains("..")) {
                 throw new IllegalArgumentException("migrations 파일명이 올바르지 않습니다");
             }
             String sql = entry.getValue() == null ? "" : entry.getValue();

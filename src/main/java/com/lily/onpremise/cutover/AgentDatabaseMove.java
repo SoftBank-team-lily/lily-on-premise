@@ -43,7 +43,9 @@ public final class AgentDatabaseMove implements DatabaseMove {
         if (current == null) {
             throw new IllegalStateException("builder 연결이 없어 RDS 를 준비할 수 없습니다");
         }
-        Map<String, String> env = current.database(job.appName(), "postgres", tunnelHost, tunnelPort);
+        // 이 PC DB 가 pgroll 을 쓰면 진행 중인 마이그레이션을 끝내 두고, RDS 에도 pgroll 을 켜 달라고 한다
+        boolean pgroll = databases.prepareLocalPgrollCopy(job.appName());
+        Map<String, String> env = current.database(job.appName(), "postgres", tunnelHost, tunnelPort, pgroll);
         if (env.isEmpty()) {
             throw new IllegalStateException("builder 가 RDS 접속 정보를 주지 않았습니다");
         }
@@ -53,7 +55,7 @@ public final class AgentDatabaseMove implements DatabaseMove {
 
     @Override
     public void toRemote(String appName, Map<String, String> rdsEnv) {
-        transfer.toRemote(appName, DatabaseTransfer.fromEnv(rdsEnv));
+        transfer.toRemote(appName, DatabaseTransfer.fromEnv(rdsEnv), databases.prepareLocalPgrollCopy(appName));
     }
 
     @Override

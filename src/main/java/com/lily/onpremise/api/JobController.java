@@ -6,6 +6,8 @@ import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.job.JobRecord;
+import com.lily.onpremise.runtime.SlotBook;
+import com.lily.onpremise.schema.pgroll.AgentPgroll;
 import com.lily.onpremise.session.ControlSession;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -27,9 +29,14 @@ public class JobController {
     private final AgentIdentity identity;
     private final ControlSession session;
     private final TrafficSwitch traffic;
+    private final AgentPgroll pgroll;
+    private final SlotBook slots;
 
     public JobController(
-            AgentService service, AgentIdentity identity, ControlSession session, TrafficSwitch traffic) {
+            AgentService service, AgentIdentity identity, ControlSession session, TrafficSwitch traffic,
+            AgentPgroll pgroll, SlotBook slots) {
+        this.pgroll = pgroll;
+        this.slots = slots;
         this.service = service;
         this.identity = identity;
         this.session = session;
@@ -68,6 +75,21 @@ public class JobController {
     @PostMapping("/api/apps/{appName}/rollback")
     public ResponseEntity<JobRecord> rollback(@PathVariable String appName) {
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(service.rollback(appName, null));
+    }
+
+    /** 스키마 이력과 pgroll 롤백 창. lily-cicd GET /api/deployments/{app}/schema 와 같은 모양 */
+    @GetMapping("/api/apps/{appName}/schema")
+    public Map<String, Object> schema(@PathVariable String appName) {
+        return pgroll.status(appName, slots.currentRelease(appName), slots.previousRelease(appName));
+    }
+
+    /** 롤백 창을 바로 닫는다. 이후에는 스키마를 되돌릴 수 없다 */
+    @PostMapping("/api/apps/{appName}/schema/complete")
+    public Map<String, Object> completeSchema(@PathVariable String appName) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("appName", appName);
+        body.put("result", pgroll.completeNow(appName));
+        return body;
     }
 
     @GetMapping("/api/jobs")

@@ -80,8 +80,22 @@ public class BurstClient {
 
     /** 클라우드와 같은 DB 의 접속 정보를 host:port(터널) 기준으로 받는다 */
     public Map<String, String> database(String appName, String engine, String host, int port) {
-        JsonNode node = send("POST", "/api/burst/apps/" + appName + "/database",
-                Map.of("engine", engine, "host", host, "port", port));
+        return database(appName, engine, host, port, false);
+    }
+
+    /**
+     * @param pgroll RDS DB 에 pgroll 을 켠다 (관리자 권한이라 builder 가 lily-db-provisioner 로 켠다).
+     *               pgroll 마이그레이션을 적용하기 전이나 pgroll 을 쓰는 DB 를 RDS 로 옮기기 전에 쓴다
+     */
+    public Map<String, String> database(String appName, String engine, String host, int port, boolean pgroll) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("engine", engine);
+        body.put("host", host);
+        body.put("port", port);
+        if (pgroll) {
+            body.put("pgroll", true);
+        }
+        JsonNode node = send("POST", "/api/burst/apps/" + appName + "/database", body);
         Map<String, String> env = new LinkedHashMap<>();
         node.path("env").fields().forEachRemaining(e -> env.put(e.getKey(), e.getValue().asText()));
         return env;

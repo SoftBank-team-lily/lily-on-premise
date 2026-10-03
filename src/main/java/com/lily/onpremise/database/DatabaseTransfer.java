@@ -28,18 +28,40 @@ public final class DatabaseTransfer {
     static final String CONTAINER = "lily-postgres";
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmss").withZone(ZoneOffset.UTC);
 
-    /** 셸 함수: local 은 컨테이너 안 소켓(관리자), remote 는 RDS 터널 주소(앱 계정) */
+    /**
+     * 셸 함수: local 은 컨테이너 안 소켓(관리자), remote 는 RDS 터널 주소(앱 계정).
+     *
+     * <p>옮기는 것은 앱 스키마 {@code public} 과 pgroll 버전 스키마 {@code public_*}(뷰), pgroll 을 쓰면 이력
+     * {@code pgroll.migrations} 의 행이다. pgroll 상태 스키마와 이벤트 트리거는 옮기지 않는다
+     * (이벤트 트리거는 superuser 가 필요하다). 대상에는 미리 pgroll 을 켜 둔다.
+     * 복원하는 DDL 이 대상의 pgroll 이력에 inferred 로 남지 않게 복원 세션은 {@code pgroll.no_inferred_migrations} 를 켠다.
+     */
     private static final String FUNCTIONS = """
             set -e -o pipefail
+            export PGOPTIONS='-c pgroll.no_inferred_migrations=TRUE'
             local_admin() { psql -X -q -v ON_ERROR_STOP=1 -U postgres -p "$LOCAL_PORT" "$@"; }
             local_app() { psql -X -q -v ON_ERROR_STOP=1 -U "$LOCAL_DB" -p "$LOCAL_PORT" -d "$LOCAL_DB" "$@"; }
             remote() { PGPASSWORD="$REMOTE_PASSWORD" psql -X -q -v ON_ERROR_STOP=1 -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" -d "$REMOTE_DB" "$@"; }
-            reset_public() { echo 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;'; }
+            reset_public() { cat <<'SQL'
+            DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;
+            DO $$DECLARE s text; BEGIN
+              FOR s IN SELECT nspname FROM pg_namespace WHERE nspname LIKE 'public\\_%' LOOP
+                EXECUTE format('DROP SCHEMA %I CASCADE', s);
+              END LOOP;
+              IF to_regclass('pgroll.migrations') IS NOT NULL THEN DELETE FROM pgroll.migrations WHERE schema = 'public'; END IF;
+            END$$;
+            SQL
+            }
+            # 대상에서 public 은 이미 만들었다. 덤프가 public 을 다시 만들면 지운다
+            no_public() { sed -e '/^CREATE SCHEMA public;$/d'; }
             """;
 
-    /** 양쪽의 테이블 목록과 테이블마다 행 수가 같아야 한다 */
+    /** 덤프 범위. 앱 스키마와 pgroll 버전 스키마(뷰) */
+    private static final String SCHEMAS = "-n public -n 'public_*'";
+
+    /** 양쪽의 테이블 목록과 테이블마다 행 수가 같아야 한다 (앱 스키마와 pgroll 이력) */
     private static final String VERIFY = """
-            tables="select quote_ident(schemaname)||'.'||quote_ident(tablename) from pg_tables where schemaname not in ('pg_catalog','information_schema') order by 1"
+            tables="select quote_ident(schemaname)||'.'||quote_ident(tablename) from pg_tables where schemaname = 'public' or (schemaname = 'pgroll' and tablename = 'migrations') order by 1"
             a=$(src -At -c "$tables")
             b=$(dst -At -c "$tables")
             if [ "$a" != "$b" ]; then echo "lily-verify: 테이블 목록이 다르다"; exit 3; fi
@@ -83,15 +105,25 @@ public final class DatabaseTransfer {
      * @param remote  RDS 의 앱 DB. 주소는 이 PC 에서 닿는 터널 주소
      */
     public void toRemote(String appName, DatabaseCredentials remote) {
+        toRemote(appName, remote, false);
+    }
+
+    /**
+     * @param pgroll PC DB 가 pgroll 을 쓴다. RDS 에는 미리 pgroll 을 켜 두고 이력 행도 옮긴다
+     */
+    public void toRemote(String appName, DatabaseCredentials remote, boolean pgroll) {
         requirePostgres(remote);
         String script = FUNCTIONS + """
                 remote -c "select 1" > /dev/null
                 remote -c "$(reset_public)"
-                pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl "$LOCAL_DB" | remote
+                pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl {SCHEMAS} "$LOCAL_DB" | no_public | remote
+                if [ "$PGROLL" = "1" ]; then
+                  pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl --data-only -t pgroll.migrations "$LOCAL_DB" | remote
+                fi
                 src() { local_admin -d "$LOCAL_DB" "$@"; }
                 dst() { remote "$@"; }
-                """ + VERIFY;
-        run(script, localName(appName), remote, "PC DB 를 RDS 로 옮기지 못했다");
+                """.replace("{SCHEMAS}", SCHEMAS) + VERIFY;
+        run(script, localName(appName), remote, "PC DB 를 RDS 로 옮기지 못했다", "PGROLL=" + (pgroll ? "1" : "0"));
     }
 
     /**
@@ -100,6 +132,13 @@ public final class DatabaseTransfer {
      * @return PC 에 남긴 백업 DB 이름
      */
     public String toLocal(String appName, DatabaseCredentials remote) {
+        return toLocal(appName, remote, false);
+    }
+
+    /**
+     * @param pgroll RDS DB 가 pgroll 을 쓴다. PC DB 에는 미리 pgroll 을 켜 두고 이력 행도 옮긴다
+     */
+    public String toLocal(String appName, DatabaseCredentials remote, boolean pgroll) {
         requirePostgres(remote);
         String db = localName(appName);
         String backup = db + "_bak_" + STAMP.format(clock.instant());
@@ -111,11 +150,14 @@ public final class DatabaseTransfer {
                 remote -c "select 1" > /dev/null
                 local_admin -c "CREATE DATABASE \\"$BACKUP_DB\\" TEMPLATE \\"$LOCAL_DB\\" OWNER \\"$LOCAL_DB\\""
                 local_app -c "$(reset_public)"
-                PGPASSWORD="$REMOTE_PASSWORD" pg_dump -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" --no-owner --no-acl "$REMOTE_DB" | local_app
+                PGPASSWORD="$REMOTE_PASSWORD" pg_dump -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" --no-owner --no-acl {SCHEMAS} "$REMOTE_DB" | no_public | local_app
+                if [ "$PGROLL" = "1" ]; then
+                  PGPASSWORD="$REMOTE_PASSWORD" pg_dump -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" --no-owner --no-acl --data-only -t pgroll.migrations "$REMOTE_DB" | local_app
+                fi
                 src() { remote "$@"; }
                 dst() { local_admin -d "$LOCAL_DB" "$@"; }
-                """ + VERIFY;
-        run(script, db, remote, "RDS DB 를 PC 로 옮기지 못했다", "BACKUP_DB=" + backup);
+                """.replace("{SCHEMAS}", SCHEMAS) + VERIFY;
+        run(script, db, remote, "RDS DB 를 PC 로 옮기지 못했다", "BACKUP_DB=" + backup, "PGROLL=" + (pgroll ? "1" : "0"));
         return backup;
     }
 
