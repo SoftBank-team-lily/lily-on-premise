@@ -26,7 +26,17 @@ public final class RelayBurstClient extends BurstClient {
         if (body != null) {
             request.set("body", json.valueToTree(body));
         }
-        JsonNode result = channel.call(request);
+        JsonNode result;
+        try {
+            result = channel.call(request);
+        } catch (PlatformChannel.Disconnected e) {
+            // 조회는 두 번 보내도 같다. 응답 전에 끊겼으면 다시 붙은 뒤 한 번 더 묻는다 (거점 전환의 진행 조회가 끊김 한 번에 멈추지 않게)
+            if (!"GET".equals(method)) {
+                throw e;
+            }
+            request.remove("rid");
+            result = channel.call(request);
+        }
         return result == null || result.isMissingNode() || result.isNull() ? json.createObjectNode() : result;
     }
 }
