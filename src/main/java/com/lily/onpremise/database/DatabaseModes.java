@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -51,6 +52,15 @@ public final class DatabaseModes implements DatabaseAccess {
 
     public ReverseTunnel reverse() {
         return reverse;
+    }
+
+    /**
+     * 앱을 지울 때 이 PC 의 DB 컨테이너(local)에 있는 앱 DB 와 계정을 지운다.
+     * external 은 사용자 DB 라서, cloud(RDS)는 builder 가 지우므로 건드리지 않는다
+     */
+    public List<String> dropLocal(String appName) {
+        onPrem.remove(appName);
+        return local.drop(appName);
     }
 
     @Override

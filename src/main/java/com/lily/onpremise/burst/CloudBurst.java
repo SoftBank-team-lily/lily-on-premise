@@ -217,6 +217,40 @@ public class CloudBurst implements BurstGate {
         }
     }
 
+    /**
+     * 앱을 지웠다. 이 앱의 대기 배포와 넘김을 잊고 켜기 상태도 처음 값으로 돌린다.
+     * 클라우드 쪽 리소스는 builder 가 지우므로 레플리카를 움직이지 않는다
+     */
+    public void forget(String app) {
+        try {
+            scheduler.submit(() -> drop(app)).get(10, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            throw new IllegalStateException("버스팅 상태를 지우지 못했습니다: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted");
+        }
+    }
+
+    void drop(String app) {
+        DeployJob job = lastJob;
+        String current = job != null ? job.appName() : appName;
+        if (app == null || !app.equals(current)) {
+            return;
+        }
+        generation.incrementAndGet();
+        pendingRecover = null;
+        proxy.clearOverflow();
+        warm = false;
+        setPhase(Phase.OFF);
+        lastJob = null;
+        appName = null;
+        host = null;
+        standbyBuild = "";
+        enabled = settings.enabled();
+        event("removed: " + app);
+    }
+
     private void setPhase(Phase next) {
         if (phase != next) {
             phaseSince = System.currentTimeMillis();

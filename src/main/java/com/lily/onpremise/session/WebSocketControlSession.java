@@ -262,7 +262,7 @@ public class WebSocketControlSession implements ControlSession {
             hello.put("database", databases.getObject().ready());
             hello.putAll(platform.getObject().hello());
             // 이 에이전트가 받는 메시지. 없으면 컨트롤 플레인은 버스팅 설정을 보내지 않는다
-            hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate"));
+            hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate", "remove"));
             session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
             Thread.ofVirtual().name("lily-burst-state").start(() -> sendState(session));
@@ -291,6 +291,13 @@ public class WebSocketControlSession implements ControlSession {
                 if ("burst".equals(type)) {
                     burst.getObject().configure(node.path("app").asText(""), node.path("enabled").asBoolean(false),
                             node.path("cloudPercent").asInt(0));
+                    return;
+                }
+                if ("remove".equals(type)) {
+                    log.info("remove received: app={} database={}", node.path("app").asText(""),
+                            node.path("database").asBoolean(false));
+                    jobs.getObject().remove(node.path("app").asText(""), node.path("id").asText(""),
+                            node.path("database").asBoolean(false));
                     return;
                 }
             } catch (IOException | RuntimeException e) {
