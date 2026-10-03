@@ -29,6 +29,10 @@ import com.lily.onpremise.platform.PlatformDatabase;
 import com.lily.onpremise.platform.RelayCloudflareClient;
 import com.lily.onpremise.schema.FlywaySchemaApply;
 import com.lily.onpremise.schema.SchemaApply;
+import com.lily.onpremise.schema.pgroll.AgentPgroll;
+import com.lily.onpremise.schema.pgroll.PgrollCli;
+import com.lily.onpremise.schema.pgroll.PgrollMigrator;
+import com.lily.onpremise.schema.pgroll.PgrollWindows;
 import com.lily.onpremise.runtime.CliContainerRuntime;
 import com.lily.onpremise.runtime.ContainerRuntime;
 import com.lily.onpremise.runtime.SlotBook;
@@ -38,6 +42,7 @@ import com.lily.onpremise.source.Workspace;
 import com.lily.onpremise.system.Commands;
 import com.lily.onpremise.system.ProcessCommands;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -165,7 +170,8 @@ public class RuntimeConfiguration {
         String bindHost = db == null ? "172.17.0.1" : db.bindHost();
         return new DatabaseModes(cloudDatabase(properties, commands, json, workDir),
                 new LocalDatabase(commands, workDir, bindHost), new ExternalDatabase(), reverse)
-                .transfer(new DatabaseTransfer(commands));
+                .transfer(new DatabaseTransfer(commands))
+                .pgroll(pgrollMigrator());
     }
 
     private static DatabaseAccess cloudDatabase(AgentProperties properties, Commands commands, ObjectMapper json,
@@ -204,6 +210,27 @@ public class RuntimeConfiguration {
         return cutover;
     }
 
+    /** pgroll CLI 는 이미지에 들어 있다 (test/burst/agent.Dockerfile). sslmode 는 DB 위치마다 정한다 */
+    static PgrollMigrator pgrollMigrator() {
+        return new PgrollMigrator(new PgrollCli(new PgrollCli.Settings("pgroll", "require", 500, 300, 1000, "0s")));
+    }
+
+    /** 무중단 스키마 변경 (pgroll). 롤백 창은 작업 폴더에 남기고, 창이 지나면 complete 한다 */
+    @Bean
+    AgentPgroll agentPgroll(AgentProperties properties, DatabaseModes databases, ObjectMapper json) {
+        String dir = properties.workspace();
+        Path root = dir == null || dir.isBlank()
+                ? Path.of(System.getProperty("java.io.tmpdir"), "lily-onprem")
+                : Path.of(dir);
+        return new AgentPgroll(pgrollMigrator(), databases.local(), new PgrollWindows(root, json),
+                Duration.ofSeconds(600));
+    }
+
+    @Bean
+    ApplicationRunner completeExpiredPgroll(AgentPgroll pgroll) {
+        return args -> pgroll.start();
+    }
+
     @Bean
     OnPremPipeline pipeline(
             Workspace workspace,
@@ -217,9 +244,10 @@ public class RuntimeConfiguration {
             DatabaseAccess databases,
             SchemaApply schema,
             CandidateJudge judge,
-            HomeCutover homes) {
+            HomeCutover homes,
+            AgentPgroll pgroll) {
         return new OnPremPipeline(
                 workspace, analyzer, runtime, readiness, exposure, publicAddress, slots,
-                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes);
+                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes, pgroll);
     }
 }

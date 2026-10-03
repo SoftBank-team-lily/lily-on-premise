@@ -7,6 +7,8 @@ import com.lily.onpremise.config.AgentProperties;
 import com.lily.onpremise.expose.LocalExposure;
 import com.lily.onpremise.expose.UpstreamProxy;
 import com.lily.onpremise.job.DeployJob;
+import com.lily.onpremise.runtime.SlotBook;
+import com.lily.onpremise.schema.pgroll.PgrollEnv;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -299,11 +301,18 @@ public class CloudBurst implements BurstGate {
     }
 
     private volatile DatabaseModes onPremDatabase;
+    private volatile SlotBook slots;
 
     /** DB 위치가 local·external 인 앱의 클라우드 접속 정보를 여기서 받는다 */
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void onPremDatabase(DatabaseModes databases) {
         this.onPremDatabase = databases;
+    }
+
+    /** 대기 Pod 가 내 PC 슬롯과 같은 pgroll 버전 스키마로 붙도록 지금 슬롯의 접속 정보를 본다 */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void slots(SlotBook slots) {
+        this.slots = slots;
     }
 
     @Override
@@ -378,12 +387,26 @@ public class CloudBurst implements BurstGate {
             }
             database = null;
             databaseEnv = env.get();
+            // 내 PC 슬롯이 pgroll 버전 스키마로 붙어 있으면 대기 Pod 도 같은 버전으로 붙는다 (같은 DB 를 같이 쓴다)
+            Optional<String> schema = liveSchema(job.appName());
+            if (schema.isPresent()) {
+                databaseEnv = PgrollEnv.withSchema(databaseEnv, schema.get());
+            }
         }
         BurstClient current = client;
         if (current == null) {
             throw new IllegalStateException("builder 연결이 없습니다");
         }
         return current.standby(job, publicHost, database, databaseEnv);
+    }
+
+    private Optional<String> liveSchema(String app) {
+        SlotBook book = slots;
+        if (book == null) {
+            return Optional.empty();
+        }
+        return book.currentRelease(app)
+                .map(release -> release.env() == null ? null : release.env().get(PgrollEnv.SCHEMA_ENV));
     }
 
     private void prepareStandby(DeployJob job, String publicHost, int run) {

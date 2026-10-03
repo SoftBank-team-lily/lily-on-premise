@@ -2,6 +2,7 @@ package com.lily.onpremise.burst;
 
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.pipeline.DatabaseAccess;
+import com.lily.onpremise.schema.pgroll.PgrollSet;
 
 import java.util.Map;
 
@@ -23,7 +24,16 @@ public class CloudDatabase implements DatabaseAccess {
     @Override
     public Map<String, String> prepare(DeployJob job) {
         tunnel.ensure();
-        return client.database(job.appName(), job.database(), tunnel.host(), tunnel.port());
+        // pgroll 마이그레이션을 받는 잡이면 RDS 에 pgroll 을 켜 달라고 한다 (관리자 권한은 builder 쪽에만 있다)
+        return client.database(job.appName(), job.database(), tunnel.host(), tunnel.port(), pgroll(job));
+    }
+
+    private static boolean pgroll(DeployJob job) {
+        try {
+            return "postgres".equals(job.database()) && PgrollSet.isPgroll(job.migrations());
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     @Override

@@ -64,6 +64,20 @@ class DeployJobTest {
     }
 
     @Test
+    void pgroll_마이그레이션_파일을_받고_대문자나_경로가_섞인_이름은_거절한다() {
+        DeployJob job = new DeployJob(
+                "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/", null, null, Map.of(), "postgres", null,
+                Map.of("01_create_posts.yaml", "operations: []", "02_add_slug.json", "{}")).normalize();
+
+        assertThat(job.migrations()).containsKeys("01_create_posts.yaml", "02_add_slug.json");
+        assertThatThrownBy(() -> new DeployJob(
+                "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                "/", null, null, Map.of(), "postgres", null, Map.of("02_Add-Slug.yaml", "x")).normalize())
+                .hasMessageContaining("migrations");
+    }
+
+    @Test
     void 마이그레이션_파일명이_아니면_거절한다() {
         assertThatThrownBy(() -> new DeployJob(
                 "job1", "https://github.com/acme/blog", "main", null, "blog", 8080,

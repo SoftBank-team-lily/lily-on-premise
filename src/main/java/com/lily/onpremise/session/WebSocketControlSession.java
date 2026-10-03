@@ -6,6 +6,8 @@ import com.lily.onpremise.burst.CloudBurst;
 import com.lily.onpremise.config.AgentProperties;
 import com.lily.onpremise.cutover.HomeCutover;
 import com.lily.onpremise.runtime.ContainerStats;
+import com.lily.onpremise.runtime.SlotBook;
+import com.lily.onpremise.schema.pgroll.AgentPgroll;
 import com.lily.onpremise.expose.UpstreamProxy;
 import com.lily.onpremise.expose.TrafficSwitch;
 import com.lily.onpremise.job.DeployJob;
@@ -43,6 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * <pre>
  * 컨트롤 플레인 → {"type":"burst","app":"..","enabled":true,"cloudPercent":30}   버스팅 켜기·끄기와 클라우드 비율
  * 컨트롤 플레인 → {"type":"home-cancel","app":".."}   진행 중인 거점 전환 취소 (주소를 바꾸기 전까지)
+ * 컨트롤 플레인 → {"type":"schema-complete","app":".."}   pgroll 롤백 창을 바로 닫는다 (complete)
  * 에이전트     → {"type":"burst-state", ...}  {@value #STATE_SECONDS}초마다 버스팅·거점 상태
  * </pre>
  */
@@ -209,7 +212,23 @@ public class WebSocketControlSession implements ControlSession {
         state.put("homeMemoryPercent", usage == null ? null : Math.round(usage.memoryPercent() * 10) / 10.0);
         long p95 = burst.getObject().proxyLocalP95();
         state.put("homeP95Ms", p95 < 0 ? null : p95);
+        // 스키마 이력 패널. lily-cicd GET /api/deployments/{app}/schema 와 같은 모양
+        AgentPgroll schema = pgroll;
+        SlotBook book = slots;
+        String app = (String) state.get("app");
+        if (schema != null && book != null && app != null && !app.isBlank()) {
+            state.put("schema", schema.cachedStatus(app, book.currentRelease(app), book.previousRelease(app)));
+        }
         return state;
+    }
+
+    private volatile AgentPgroll pgroll;
+    private volatile SlotBook slots;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void pgroll(AgentPgroll pgroll, SlotBook slots) {
+        this.pgroll = pgroll;
+        this.slots = slots;
     }
 
     private void sendState(WebSocketSession session) {
@@ -262,7 +281,7 @@ public class WebSocketControlSession implements ControlSession {
             hello.put("database", databases.getObject().ready());
             hello.putAll(platform.getObject().hello());
             // 이 에이전트가 받는 메시지. 없으면 컨트롤 플레인은 버스팅 설정을 보내지 않는다
-            hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate", "remove"));
+            hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate", "remove", "pgroll"));
             session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
             Thread.ofVirtual().name("lily-burst-state").start(() -> sendState(session));
@@ -291,6 +310,15 @@ public class WebSocketControlSession implements ControlSession {
                 if ("burst".equals(type)) {
                     burst.getObject().configure(node.path("app").asText(""), node.path("enabled").asBoolean(false),
                             node.path("cloudPercent").asInt(0));
+                    return;
+                }
+                if ("schema-complete".equals(type)) {
+                    // 롤백 창을 바로 닫는다 (화면의 complete 버튼). 이후에는 스키마를 되돌릴 수 없다
+                    String app = node.path("app").asText("");
+                    AgentPgroll schema = pgroll;
+                    if (schema != null) {
+                        log.info("schema complete received: app={} result={}", app, schema.completeNow(app));
+                    }
                     return;
                 }
                 if ("remove".equals(type)) {

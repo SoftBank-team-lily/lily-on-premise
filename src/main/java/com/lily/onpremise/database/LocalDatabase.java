@@ -1,5 +1,7 @@
 package com.lily.onpremise.database;
 
+import com.lily.onpremise.schema.pgroll.DbTarget;
+import com.lily.onpremise.schema.pgroll.PgrollCli;
 import com.lily.onpremise.system.Commands;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,6 +72,45 @@ public final class LocalDatabase {
         // 기본값은 PUBLIC 에 CONNECT 가 열려 있다. 다른 앱 계정이 붙지 못하게 막는다
         psql("REVOKE ALL ON DATABASE \"" + name + "\" FROM PUBLIC", "postgres: revoke " + name);
         return new DatabaseCredentials("postgres", bindHost, POSTGRES_PORT, name, name, password, "");
+    }
+
+    /** 이미 만든 앱의 postgres 접속 정보 (컨테이너와 계정은 그대로). 만든 적이 없으면 빈 값 */
+    public java.util.Optional<DatabaseCredentials> postgres(String appName) {
+        String name = appName.replace('-', '_');
+        if (!name.matches("[a-z][a-z0-9_]{0,30}") || !Files.isRegularFile(dir.resolve("postgres-" + name))) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(new DatabaseCredentials("postgres", bindHost, POSTGRES_PORT, name, name,
+                secret("postgres-" + name), ""));
+    }
+
+    /**
+     * 앱 DB 에 pgroll 을 켠다. init 은 이벤트 트리거를 만들어서 superuser({@code postgres}) 로 하고,
+     * 앱 계정에 pgroll 상태 스키마 권한을 준다. 이후 start/complete/rollback 은 앱 계정으로 돈다.
+     */
+    public synchronized void enablePgroll(String appName, PgrollCli cli) {
+        String name = appName.replace('-', '_');
+        if (!name.matches("[a-z][a-z0-9_]{0,30}")) {
+            throw new IllegalArgumentException("DB 이름으로 쓸 수 없는 앱 이름: " + appName);
+        }
+        String admin = secret("postgres-admin");
+        ensurePostgres(admin);
+        // 이 PC 의 DB 컨테이너는 SSL 이 없다
+        cli.init(new DbTarget("jdbc:postgresql://" + bindHost + ":" + POSTGRES_PORT + "/" + name, "postgres", admin, "disable"));
+        for (String grant : List.of(
+                "GRANT USAGE, CREATE ON SCHEMA pgroll TO \"%s\"",
+                "GRANT ALL ON ALL TABLES IN SCHEMA pgroll TO \"%s\"",
+                "GRANT ALL ON ALL SEQUENCES IN SCHEMA pgroll TO \"%s\"",
+                "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA pgroll TO \"%s\"")) {
+            try {
+                commands.run(List.of("docker", "exec", "lily-postgres", "psql", "-U", "postgres",
+                        "-p", String.valueOf(POSTGRES_PORT), "-d", name, "-v", "ON_ERROR_STOP=1", "-q",
+                        "-c", grant.formatted(name)), null);
+            } catch (RuntimeException e) {
+                throw new IllegalStateException("postgres: pgroll 권한 부여 실패" + reason(e));
+            }
+        }
+        log.info("pgroll enabled on local postgres: db={}", name);
     }
 
     /**

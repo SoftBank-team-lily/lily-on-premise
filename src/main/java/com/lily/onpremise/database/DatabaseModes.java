@@ -2,6 +2,8 @@ package com.lily.onpremise.database;
 
 import com.lily.onpremise.job.DeployJob;
 import com.lily.onpremise.pipeline.DatabaseAccess;
+import com.lily.onpremise.schema.pgroll.DbTarget;
+import com.lily.onpremise.schema.pgroll.PgrollMigrator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +45,11 @@ public final class DatabaseModes implements DatabaseAccess {
         this.local = local;
         this.external = external;
         this.reverse = reverse;
+    }
+
+    /** 이 PC 의 DB 컨테이너 (pgroll init 을 관리자 계정으로 한다) */
+    public LocalDatabase local() {
+        return local;
     }
 
     /** RDS 터널 쪽 구현 (플랫폼 인증서, 팀 환경 파일, 또는 없음) */
@@ -107,13 +114,99 @@ public final class DatabaseModes implements DatabaseAccess {
         }
         // cloud 잡과 같은 길로 RDS 터널을 연다. 접속 정보는 컨트롤 플레인이 databaseEnv 로 보낸 것이다
         Map<String, String> rds = cloud.prepare(job);
-        String backup = current.toLocal(job.appName(), DatabaseTransfer.fromEnv(rds));
+        boolean pgroll = preparePgrollCopy(job.appName(), rds);
+        String backup = current.toLocal(job.appName(), DatabaseTransfer.fromEnv(rds), pgroll);
         log.info("imported cloud database into this pc: app={} backup={}", job.appName(), backup);
+    }
+
+    private volatile PgrollMigrator pgroll;
+
+    /** pgroll 을 쓰는 앱의 DB 를 옮길 때 쓴다 */
+    public DatabaseModes pgroll(PgrollMigrator pgroll) {
+        this.pgroll = pgroll;
+        return this;
+    }
+
+    /**
+     * RDS 가 pgroll 을 쓰면 옮기기 전에 진행 중인 마이그레이션을 complete 해서 버전을 하나로 만들고,
+     * 이 PC 의 앱 DB 에 pgroll 을 켠다 (관리자 계정). 이력 행은 {@link DatabaseTransfer#toLocal} 이 옮긴다
+     *
+     * @return RDS 가 pgroll 을 쓴다
+     */
+    private boolean preparePgrollCopy(String appName, Map<String, String> rds) {
+        PgrollMigrator migrator = pgroll;
+        if (migrator == null) {
+            return false;
+        }
+        Map<String, String> source = new LinkedHashMap<>(rds);
+        source.put(DbTarget.SSLMODE, "require");
+        if (!migrator.installed(source)) {
+            return false;
+        }
+        migrator.active(source).ifPresent(active -> {
+            migrator.complete(source, active, new java.util.ArrayList<>());
+            log.info("completed pgroll on RDS before copy: app={} migration={}", appName, active);
+        });
+        local.enablePgroll(appName, migrator.cli());
+        return true;
+    }
+
+    /**
+     * 이 PC 의 앱 DB 를 RDS 로 옮기기 전. pgroll 을 쓰면 진행 중인 마이그레이션을 complete 해서 버전을 하나로 만든다.
+     * RDS 쪽 pgroll 은 builder 가 lily-db-provisioner 로 켠다 ({@code BurstClient#database} 의 pgroll)
+     *
+     * @return 이 PC 의 앱 DB 가 pgroll 을 쓴다
+     */
+    public boolean prepareLocalPgrollCopy(String appName) {
+        PgrollMigrator migrator = pgroll;
+        Optional<DatabaseCredentials> db = local.postgres(appName);
+        if (migrator == null || db.isEmpty()) {
+            return false;
+        }
+        Map<String, String> env = new LinkedHashMap<>(db.get().env());
+        env.put(DbTarget.SSLMODE, "disable");
+        if (!migrator.installed(env)) {
+            return false;
+        }
+        migrator.active(env).ifPresent(active -> {
+            migrator.complete(env, active, new java.util.ArrayList<>());
+            log.info("completed pgroll on this pc before copy: app={} migration={}", appName, active);
+        });
+        return true;
     }
 
     /** 에이전트에서 붙을 주소 (스키마 적용). external 이 localhost 면 앱과 에이전트의 주소가 다르다 */
     @Override
     public Map<String, String> agentEnv(DeployJob job, Map<String, String> appEnv) {
+        Map<String, String> env = new LinkedHashMap<>(agentAddresses(job, appEnv));
+        env.put(DbTarget.SSLMODE, sslmode(job.databaseModeOrDefault(), env));
+        return env;
+    }
+
+    /**
+     * pgroll CLI(lib/pq) 의 sslmode. lib/pq 에는 prefer 가 없어서 DB 위치로 정한다.
+     * 이 PC 의 DB 컨테이너는 SSL 이 없고, RDS 는 SSL 이 필요하다. 사용자 DB 는 주소의 sslmode 를 따른다
+     */
+    static String sslmode(String mode, Map<String, String> env) {
+        return switch (mode) {
+            case "local" -> "disable";
+            case "external" -> {
+                String url = env.getOrDefault("DB_URL", "");
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("[?&]sslmode=([a-z-]+)").matcher(url);
+                if (!m.find()) {
+                    yield "disable";
+                }
+                yield switch (m.group(1)) {
+                    case "disable", "allow" -> "disable";
+                    case "verify-ca", "verify-full" -> m.group(1);
+                    default -> "require";
+                };
+            }
+            default -> "require";
+        };
+    }
+
+    private Map<String, String> agentAddresses(DeployJob job, Map<String, String> appEnv) {
         ExternalDatabase.Resolved db = onPrem.get(job.appName());
         if (db == null || "cloud".equals(job.databaseModeOrDefault()) || db.app().equals(db.agent())) {
             return appEnv;
