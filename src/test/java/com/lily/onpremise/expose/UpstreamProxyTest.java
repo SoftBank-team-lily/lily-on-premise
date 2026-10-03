@@ -13,10 +13,30 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class UpstreamProxyTest {
 
     private final HttpClient http = HttpClient.newHttpClient();
+
+    @Test
+    void 포트_0으로_전환하면_앱을_뗀_것이라_503을_돌려주고_음수는_거절한다() throws Exception {
+        UpstreamProxy proxy = new UpstreamProxy(0);
+        proxy.start();
+        HttpServer app = listen("one");
+        try {
+            proxy.switchTo(app.getAddress().getPort());
+            assertThat(get(proxy.port()).body()).isEqualTo("one");
+            proxy.switchTo(0);
+            assertThat(get(proxy.port()).statusCode()).isEqualTo(503);
+            assertThat(proxy.upstreamPort()).isZero();
+            assertThatThrownBy(() -> proxy.switchTo(-1))
+                    .isInstanceOf(IllegalArgumentException.class);
+        } finally {
+            proxy.close();
+            app.stop(0);
+        }
+    }
 
     @Test
     void 전환_이후_요청만_새_포트로_간다() throws Exception {
