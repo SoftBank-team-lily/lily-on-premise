@@ -168,6 +168,8 @@ else:
 
 docker build (메모리·CPU·프로세스 한도, 호스트 마운트 없음)
 schema migrate (스크립트가 있을 때, 후보를 띄우기 전)
+    PostgreSQL + pgroll 파일: pgroll start → 후보는 버전 스키마 public_{이름} 으로 접속
+    그 밖: Flyway SQL
 docker run (127.0.0.1, 같은 한도, capability 없음, --restart unless-stopped)
 
 wait health(180s)
@@ -235,6 +237,10 @@ flowchart TD
 
 프록시 변경 자체가 실패하면 upstream은 아직 이전 슬롯을 가리키므로, 후보 컨테이너를 삭제합니다.
 
+#### pgroll 마이그레이션이 있을 때
+
+후보를 띄우기 전에 `pgroll start` 로 새 버전 스키마를 엽니다. 이전 슬롯은 이전 버전 스키마로, 후보는 새 버전 스키마로 같은 테이블을 씁니다. 전환 전에 실패하면(헬스, 판정, 호스트이름, 프록시) 후보를 지운 뒤 이번 잡이 시작한 마이그레이션을 `pgroll rollback` 합니다. 상태 메시지 끝에 `schema reverted (pgroll rollback {이름})` 가 붙습니다.
+
 ---
 
 ## Active Slot
@@ -291,7 +297,7 @@ Active Slot은 프로세스 메모리(`SlotBook`)에만 있습니다. 에이전�
 | `databaseEnv` | 컨트롤 플레인이 터널 주소로 만든 RDS 접속 환경변수 (`cloud`) |
 | `importDatabase` | `local` + postgres일 때 RDS 데이터를 이 PC DB로 옮긴 뒤 띄웁니다 |
 | `canaryPath` | 전환 전 판정 경로. 비우면 헬스 경로 |
-| `migrations` | 파일명 → SQL                                  |
+| `migrations` | 파일명 → 내용. `V{n}__{설명}.sql`(Flyway) 또는 `{n}_{설명}.yaml`·`.json`(pgroll, postgres) |
 
 `repoUrl`에 사용자 정보가 들어 있으면 거절합니다. 토큰은 `token` 필드로만 받습니다.
 
@@ -584,7 +590,9 @@ WebSocket 없이 같은 파이프라인을 실행할 때 사용합니다. 본문
 | GET    | `/api/burst`   | 버스팅 단계, 로컬·클라우드 처리 중 요청, 최근 이벤트 |
 | GET    | `/api/apps/{app}/home` | 거점, 진행 단계, 이벤트 |
 | POST   | `/api/apps/{app}/home` | 거점 전환. 본문 `{"home":"cloud", "migrateDatabase":false}` (`home` 은 `cloud`·`onprem`). 이미 그 거점이면 200, 시작하면 202 |
-| POST   | `/api/apps/{app}/rollback` | 직전 슬롯으로 되돌립니다. 스키마는 그대로입니다. 거점이 클라우드면 거절 |
+| POST   | `/api/apps/{app}/rollback` | 직전 슬롯으로 되돌립니다. 롤백 창 안의 pgroll 마이그레이션이면 트래픽을 옮긴 뒤 `pgroll rollback` 합니다. 창이 닫혔으면 트래픽을 그대로 두고 거절합니다. 거점이 클라우드면 거절 |
+| GET    | `/api/apps/{app}/schema` | 스키마 상태. lily-cicd `GET /api/deployments/{app}/schema` 와 같은 모양 (`engine`, `currentVersion`, `window`, `slots`, `history`) |
+| POST   | `/api/apps/{app}/schema/complete` | 롤백 창을 기다리지 않고 바로 `pgroll complete` 합니다 |
 
 이 머신에서는 한 번에 하나의 잡만 슬롯을 바꿉니다. 같은 id의 잡이 이미 있으면 거절합니다.
 
@@ -751,6 +759,24 @@ DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를
 - 역방향 터널: 플랫폼이 welcome 으로 `reverseHost`·`reversePort` 를 주면 `ssh -R {reverseHost}:{reversePort}:{DB}` 로 이 PC 의 DB 를 lily-server 사설 IP 에 연다. 끊기면 5초 뒤 다시 연다 (`ReverseTunnel`). 인증서 key ID 가 `agent-{key}-p{port}` 라 배스천은 그 포트 하나만 허용한다
 - 역방향 터널이 없으면 `local`·`external` 앱의 클라우드 대기 배포는 하지 않는다
 - DB 가 이 PC 에 있으면 PC 가 꺼질 때 DB 도 꺼져 클라우드가 이어받지 못한다
+
+### 스키마 변경 (pgroll)
+
+PostgreSQL 앱의 `migrations` 가 pgroll 파일(`01_create_posts.yaml`)이면 Flyway 대신 pgroll 로 expand/contract 합니다. 규칙은 클라우드(lily-cicd)와 같습니다.
+
+| 단계 | 동작 |
+|---|---|
+| 켜기 | 처음 한 번 `pgroll init`. `local` 은 에이전트가 `postgres` 관리자 계정으로 켜고 앱 계정에 `pgroll` 스키마 권한을 줍니다. `cloud` 는 builder 가 프로비저너로 켭니다. `external` 은 사용자 계정으로 켜고, superuser 가 아니면 이유와 함께 거절합니다 (Flyway SQL 을 쓰면 됩니다) |
+| 검사 | `sql` 연산, 기본값 없는 NOT NULL `add_column`, `down` 없는 `alter_column`(`up`·`type`) 은 시작 전에 거절합니다 |
+| 시작 | 진행 중인 이전 마이그레이션을 `complete` 한 뒤 아직 적용하지 않은 파일 하나를 `pgroll start`. 후보에 `DB_URL ...?currentSchema=public_{이름}`, `LILY_DB_SCHEMA`, `SPRING_FLYWAY_ENABLED=false` 를 넣습니다 |
+| 롤백 창 | 전환 뒤 600초. 창은 `{AGENT_WORKSPACE}/pgroll/{app}.json` 에 남아 에이전트가 다시 떠도 30초마다 만료를 확인해 `complete` 합니다 |
+| 롤백 | 창 안이면 직전 슬롯으로 트래픽을 옮긴 뒤 `pgroll rollback`. 결과 줄은 `rollback: slot={슬롯} schema=reverted` |
+| 상태 | `burst-state` 에 `schema` 를 실어 builder 가 프로젝트 화면의 스키마 이력으로 보여 줍니다. builder 의 `schema-complete` 메시지로 바로 complete 합니다 |
+
+- 이 PC 의 `lily-postgres` 는 SSL 이 없어 pgroll 은 `sslmode=disable`, RDS 는 `require`, `external` 은 주소의 `sslmode` 를 따릅니다
+- 마이그레이션 파일 없이 배포해도 pgroll 로 관리하던 DB 면 최신 버전 스키마로 접속합니다
+- 클라우드 대기 배포는 지금 트래픽을 받는 슬롯의 `LILY_DB_SCHEMA` 로 접속합니다
+- DB 이전은 출발 쪽의 진행 중 마이그레이션을 `complete` 한 뒤, 도착 쪽에 pgroll 을 켜고 `public`·`public_*` 스키마와 `pgroll.migrations` 이력을 함께 옮깁니다
 
 ## 거점 전환
 
