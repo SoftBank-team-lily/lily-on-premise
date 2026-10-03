@@ -549,8 +549,10 @@ builder  → job     {..., "database": "postgres", "databaseEnv": {"DB_URL": "jd
 접속 직후 에이전트가 보내는 메시지입니다.
 
 ```json
-{"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false,"databaseModes":["cloud","local","external","import"],"features":["burst","home","home-cancel","remediate"]}
+{"type":"hello","agentId":"edge-1","publicUrl":"","version":"0.1.0","database":false,"databaseModes":["cloud","local","external","import"],"features":["burst","home","home-cancel","remediate","remove","pgroll","cancel"]}
 ```
+
+배포 취소는 `{"type":"cancel","id":"job1"}` 입니다. 도는 잡이면 기다리던 `git`·`docker` 프로세스를 끊고 헬스·판정 대기를 깨운 뒤 `CANCELLED` 로 끝냅니다. 트래픽을 새 슬롯으로 바꾸기 직전까지만 받고, 후보 컨테이너를 띄웠으면 지웁니다 (이번 잡이 시작한 pgroll 마이그레이션도 되돌립니다). 잡이 오기 전에 온 취소는 기억했다가 그 잡을 바로 `CANCELLED` 로 끝냅니다.
 
 컨트롤 플레인이 같은 소켓으로 보내는 잡입니다.
 

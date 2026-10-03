@@ -10,7 +10,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public final class JobRecord {
 
     public enum Status {
-        QUEUED, CHECKOUT, ANALYZE, BUILDING, STARTING, HEALTH, JUDGING, SWITCHING, SUCCEEDED, FAILED
+        QUEUED, CHECKOUT, ANALYZE, BUILDING, STARTING, HEALTH, JUDGING, SWITCHING, SUCCEEDED, FAILED,
+        /** 컨트롤 플레인이 취소했다. 트래픽은 이전 슬롯 그대로 */
+        CANCELLED
     }
 
     private final String id;

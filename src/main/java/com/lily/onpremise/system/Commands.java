@@ -18,4 +18,8 @@ public interface Commands {
     void start(List<String> command, Consumer<String> lines);
 
     void close();
+
+    /** owner 스레드가 기다리고 있는 프로세스({@link #run}·{@link #output})를 끊는다. 배포 취소가 부른다 */
+    default void interrupt(Thread owner) {
+    }
 }

@@ -6,12 +6,16 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
 public final class ProcessCommands implements Commands {
 
     private final List<Process> background = new CopyOnWriteArrayList<>();
+    /** 스레드가 끝나기를 기다리는 프로세스. 출력 읽기는 interrupt 로 깨지 않아서 취소는 프로세스를 끊는다 */
+    private final Map<Thread, Process> foreground = new ConcurrentHashMap<>();
 
     @Override
     public void run(List<String> command, Path workDir) {
@@ -25,6 +29,7 @@ public final class ProcessCommands implements Commands {
 
     private String finish(List<String> command, Path workDir) {
         Process process = startProcess(command, workDir);
+        foreground.put(Thread.currentThread(), process);
         try {
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int code = process.waitFor();
@@ -38,6 +43,17 @@ public final class ProcessCommands implements Commands {
             throw new IllegalStateException("interrupted");
         } catch (IOException e) {
             throw new IllegalStateException(display(command) + " → " + e.getMessage(), e);
+        } finally {
+            foreground.remove(Thread.currentThread(), process);
+        }
+    }
+
+    @Override
+    public void interrupt(Thread owner) {
+        Process process = foreground.get(owner);
+        if (process != null) {
+            process.descendants().forEach(ProcessHandle::destroyForcibly);
+            process.destroyForcibly();
         }
     }
 

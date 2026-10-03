@@ -46,6 +46,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 컨트롤 플레인 → {"type":"burst","app":"..","enabled":true,"cloudPercent":30}   버스팅 켜기·끄기와 클라우드 비율
  * 컨트롤 플레인 → {"type":"home-cancel","app":".."}   진행 중인 거점 전환 취소 (주소를 바꾸기 전까지)
  * 컨트롤 플레인 → {"type":"schema-complete","app":".."}   pgroll 롤백 창을 바로 닫는다 (complete)
+ * 컨트롤 플레인 → {"type":"cancel","id":".."}   진행 중인 배포 취소 (트래픽을 새 슬롯으로 바꾸기 전까지)
  * 에이전트     → {"type":"burst-state", ...}  {@value #STATE_SECONDS}초마다 버스팅·거점 상태
  * </pre>
  */
@@ -281,7 +282,7 @@ public class WebSocketControlSession implements ControlSession {
             hello.put("database", databases.getObject().ready());
             hello.putAll(platform.getObject().hello());
             // 이 에이전트가 받는 메시지. 없으면 컨트롤 플레인은 버스팅 설정을 보내지 않는다
-            hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate", "remove", "pgroll"));
+            hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate", "remove", "pgroll", "cancel"));
             session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
             Thread.ofVirtual().name("lily-burst-state").start(() -> sendState(session));
@@ -319,6 +320,11 @@ public class WebSocketControlSession implements ControlSession {
                     if (schema != null) {
                         log.info("schema complete received: app={} result={}", app, schema.completeNow(app));
                     }
+                    return;
+                }
+                if ("cancel".equals(type)) {
+                    String id = node.path("id").asText("");
+                    log.info("cancel received: id={} accepted={}", id, jobs.getObject().cancel(id));
                     return;
                 }
                 if ("remove".equals(type)) {
