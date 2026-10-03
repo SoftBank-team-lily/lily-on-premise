@@ -84,7 +84,9 @@ public final class SlotRecovery {
             slots.commit(app, slot);
             log.info("slot restored: {} on 127.0.0.1:{}", name, port);
             try {
-                resumed.accept(env(name));
+                Map<String, String> env = env(name);
+                slots.recovered(app, slot, env);
+                resumed.accept(env);
             } catch (RuntimeException e) {
                 log.warn("slot {} env not read: {}", name, e.getMessage());
             }

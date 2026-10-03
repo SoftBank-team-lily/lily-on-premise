@@ -80,7 +80,7 @@ public class JobController {
     /** 스키마 이력과 pgroll 롤백 창. lily-cicd GET /api/deployments/{app}/schema 와 같은 모양 */
     @GetMapping("/api/apps/{appName}/schema")
     public Map<String, Object> schema(@PathVariable String appName) {
-        return pgroll.status(appName, slots.currentRelease(appName), slots.previousRelease(appName));
+        return pgroll.status(appName, slots.liveRelease(appName), slots.previousRelease(appName));
     }
 
     /** 롤백 창을 바로 닫는다. 이후에는 스키마를 되돌릴 수 없다 */

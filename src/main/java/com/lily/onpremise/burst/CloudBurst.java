@@ -417,7 +417,7 @@ public class CloudBurst implements BurstGate {
         if (book == null) {
             return Optional.empty();
         }
-        return book.currentRelease(app)
+        return book.liveRelease(app)
                 .map(release -> release.env() == null ? null : release.env().get(PgrollEnv.SCHEMA_ENV));
     }
 

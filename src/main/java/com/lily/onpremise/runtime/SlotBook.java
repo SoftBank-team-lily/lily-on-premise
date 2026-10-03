@@ -20,6 +20,8 @@ public class SlotBook {
     /** 프로세스 메모리에만 둔다. 에이전트가 재시작하면 이전 이미지는 남아도 롤백 기록은 없다 */
     private volatile Release current;
     private volatile Release previous;
+    /** 재시작 뒤 {@link SlotRecovery} 가 다시 붙인 슬롯. 스키마 상태와 대기 배포의 접속 스키마에만 쓰고 롤백에는 쓰지 않는다 */
+    private volatile Release recovered;
 
     public Optional<Slot> active(String app) {
         return Optional.ofNullable(active.get(app));
@@ -62,7 +64,24 @@ public class SlotBook {
             previous = null;
         }
         current = release;
+        recovered = null;
         active.put(release.app(), Slot.valueOf(release.slot().toUpperCase(Locale.ROOT)));
+    }
+
+    /** 재시작 뒤 떠 있던 슬롯을 다시 붙였다. 컨테이너 환경변수(LILY_DB_SCHEMA 등)를 기억한다 */
+    public void recovered(String app, Slot slot, Map<String, String> env) {
+        active.put(app, slot);
+        recovered = new Release(app, slot.name().toLowerCase(Locale.ROOT), null, 0, 0, null, Map.copyOf(env));
+    }
+
+    /** 지금 트래픽을 받는 슬롯. 이번 프로세스에서 공개한 릴리스가 없으면 재시작 뒤 다시 붙인 슬롯 */
+    public Optional<Release> liveRelease(String app) {
+        Optional<Release> published = currentRelease(app);
+        if (published.isPresent()) {
+            return published;
+        }
+        Release back = recovered;
+        return back != null && back.app().equals(app) ? Optional.of(back) : Optional.empty();
     }
 
     public Optional<Release> currentRelease(String app) {
@@ -87,6 +106,9 @@ public class SlotBook {
     /** 앱을 지웠다. 활성 슬롯과 롤백 기록에서 뺀다 */
     public void forget(String app) {
         active.remove(app);
+        if (recovered != null && recovered.app().equals(app)) {
+            recovered = null;
+        }
         if (previous != null && previous.app().equals(app)) {
             previous = null;
         }

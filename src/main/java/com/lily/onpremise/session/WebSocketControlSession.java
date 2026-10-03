@@ -217,7 +217,7 @@ public class WebSocketControlSession implements ControlSession {
         SlotBook book = slots;
         String app = (String) state.get("app");
         if (schema != null && book != null && app != null && !app.isBlank()) {
-            state.put("schema", schema.cachedStatus(app, book.currentRelease(app), book.previousRelease(app)));
+            state.put("schema", schema.cachedStatus(app, book.liveRelease(app), book.previousRelease(app)));
         }
         return state;
     }
