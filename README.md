@@ -701,7 +701,7 @@ SPRING_PROFILES_ACTIVE=local
 - 거점 전환 중에는 켜기·끄기를 거절하고, 공개 주소가 클라우드면 켜기를 거절한다 (늦게 끝난 대기 배포가 공개 주소를 받는 클라우드 Pod 를 0 으로 내리는 문제)
 - 상태 보고 `burst-state` (3초마다): 버스팅 `enabled`·`cloudPercent`·`phase`·처리 중 요청, 거점 `home`·`homeSteps`·`homeStep`·`homeCancellable`·`databaseMode`·`databaseMovable`, 자원 `homeCpuPercent`·`homeMemoryMiB`·`homeMemoryPercent`(docker stats)·`homeP95Ms`(이 PC 가 처리한 최근 5분 요청)
 - 에이전트가 다시 뜨면 다시 붙인 앱으로 버스팅을 이어 간다 (`CloudBurst.recover`). 대기 배포를 새로 하지 않고, 클라우드에 남은 대기 배포의 레플리카를 `warmReplicas` 로 맞춘 뒤 닿으면 넘김을 켠다. 대기 배포가 없거나(404) 버스팅이 꺼져 있으면 다음 배포를 기다린다. 거점이 클라우드면 앱만 기억하고 거점이 돌아올 때 이어 간다
-- PC 가 꺼졌을 때는 버스팅이 아니라 lily-builder 의 엣지 Worker 와 CNAME 전환이 클라우드로 보낸다 (lily-builder `docs/장애-자동-전환.md`)
+- PC 가 꺼졌을 때는 버스팅이 아니라 lily-builder 의 엣지 Worker 와 CNAME 전환이 클라우드로 보낸다 (lily-builder `docs/장애-자동-전환.md`). DB 가 PC 에 있어 클라우드도 못 받으면 엣지 읽기 사본과 쓰기 큐가 받는다 (lily-builder `docs/엣지-쓰기-큐.md`)
 
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
@@ -767,7 +767,7 @@ DB 는 `BURST_BUILDER_URL`, `BURST_API_TOKEN` 도 필요하다 (lily-builder 를
 
 요청 경로와 데이터 경로에 AWS 가 없다. DB 는 위 `local` 과 같은 `lily-postgres` 컨테이너와 named volume `lily-postgres-data` 다. 앱마다 database 와 계정을 만들고, 비밀번호는 이 PC 의 환경변수로만 넘긴다. 빌더는 RDS 프로비저너를 부르지 않고, `ssh -L` 과 역방향 터널도 열지 않는다. 블루그린은 같은 로컬 DB 를 다시 쓴다.
 
-버스팅, 웜 스탠바이, 거점 전환은 거절한다. PC 가 꺼지면 서비스가 멈춘다. TLS 는 Cloudflare 에서 끝나고, 터널 안은 HTTP 다. 백업과 볼륨 보관은 사용자 책임이다. 컨테이너는 기존과 같이 host 네트워크로 `127.0.0.1:25432`·`172.17.0.1` 만 연다. 하이브리드의 `local` 과 컨테이너를 공유하므로 포트를 바꾸지 않는다.
+버스팅, 웜 스탠바이, 거점 전환은 거절한다. PC 가 꺼지면 앱은 멈추고, lily-builder 의 엣지 Worker 가 공개 GET 은 읽기 사본(Cache API)으로 답하고 등록한 경로의 POST 는 쓰기 큐(Cloudflare Durable Object)에 쌓았다가 PC 가 돌아오면 받은 순서대로 다시 보낸다 (lily-builder README "PC 장애 시 클라우드로"). TLS 는 Cloudflare 에서 끝나고, 터널 안은 HTTP 다. 백업과 볼륨 보관은 사용자 책임이다. 컨테이너는 기존과 같이 host 네트워크로 `127.0.0.1:25432`·`172.17.0.1` 만 연다. 하이브리드의 `local` 과 컨테이너를 공유하므로 포트를 바꾸지 않는다.
 
 ### 스키마 변경 (pgroll)
 
