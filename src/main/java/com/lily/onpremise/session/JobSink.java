@@ -18,4 +18,11 @@ public interface JobSink {
 
     /** @param migrateDatabase 앱 DB 도 옮긴다 (클라우드로: 내 PC → RDS, 온프레미스로: RDS → 내 PC) */
     HomeCutover.Status home(String app, String target, String id, boolean migrateDatabase);
+
+    /**
+     * 앱을 이 PC 에서 지운다 (슬롯 컨테이너, 이미지, 버스팅·거점 기억). 공개 주소와 클라우드 쪽은 builder 가 지운다.
+     *
+     * @param database true 면 이 PC 의 DB 컨테이너에 있는 앱 DB 와 계정도 지운다. 사용자가 준 외부 DB 는 건드리지 않는다
+     */
+    JobRecord remove(String app, String id, boolean database);
 }

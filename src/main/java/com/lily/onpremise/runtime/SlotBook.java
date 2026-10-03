@@ -84,6 +84,18 @@ public class SlotBook {
         active.put(app, Slot.valueOf(current.slot().toUpperCase(Locale.ROOT)));
     }
 
+    /** 앱을 지웠다. 활성 슬롯과 롤백 기록에서 뺀다 */
+    public void forget(String app) {
+        active.remove(app);
+        if (previous != null && previous.app().equals(app)) {
+            previous = null;
+        }
+        if (current != null && current.app().equals(app)) {
+            current = null;
+            previous = null;
+        }
+    }
+
     /**
      * 한 번 공개했던 슬롯. 컨테이너를 지운 뒤에도 이미지 태그로 다시 띄울 수 있다.
      */

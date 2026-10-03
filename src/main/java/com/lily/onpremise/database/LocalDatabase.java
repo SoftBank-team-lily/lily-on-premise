@@ -72,6 +72,42 @@ public final class LocalDatabase {
         return new DatabaseCredentials("postgres", bindHost, POSTGRES_PORT, name, name, password, "");
     }
 
+    /**
+     * 앱을 지울 때. 이 PC 의 DB 컨테이너에 있는 앱 database 와 계정을 지우고 저장한 비밀번호도 지운다.
+     * 엔진 컨테이너가 없으면 그 엔진은 건너뛴다 (컨테이너를 새로 띄우지 않는다)
+     *
+     * @return 지운 것. 예: {@code postgres lily_blog}
+     */
+    public synchronized List<String> drop(String appName) {
+        String name = appName.replace('-', '_');
+        if (!name.matches("[a-z][a-z0-9_]{0,30}")) {
+            throw new IllegalArgumentException("DB 이름으로 쓸 수 없는 앱 이름: " + appName);
+        }
+        List<String> dropped = new java.util.ArrayList<>();
+        if (startExisting("lily-postgres")) {
+            await(List.of("docker", "exec", "lily-postgres", "pg_isready", "-q", "-h", "127.0.0.1",
+                    "-p", String.valueOf(POSTGRES_PORT), "-U", "postgres"), "postgres");
+            // 접속 중인 세션이 있어도 지운다 (앱 컨테이너는 이미 내렸다)
+            psql("DROP DATABASE IF EXISTS \"" + name + "\" WITH (FORCE)", "postgres: drop database " + name);
+            psql("DROP ROLE IF EXISTS \"" + name + "\"", "postgres: drop role " + name);
+            dropped.add("postgres " + name);
+        }
+        if (startExisting("lily-mysql")) {
+            await(mysql(null, "mysqladmin"), "mysql");
+            admin(mysql("DROP DATABASE IF EXISTS `" + name + "`; DROP USER IF EXISTS '" + name + "'@'%';", "mysql"),
+                    "mysql: drop " + name);
+            dropped.add("mysql " + name);
+        }
+        for (String file : List.of("postgres-" + name, "mysql-" + name)) {
+            try {
+                Files.deleteIfExists(dir.resolve(file));
+            } catch (IOException e) {
+                log.warn("db secret not removed: {} {}", file, e.getMessage());
+            }
+        }
+        return dropped;
+    }
+
     private void ensurePostgres(String admin) {
         if (!startExisting("lily-postgres")) {
             admin(List.of("docker", "run", "-d", "--name", "lily-postgres",

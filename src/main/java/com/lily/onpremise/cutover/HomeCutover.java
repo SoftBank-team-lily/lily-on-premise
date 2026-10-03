@@ -293,6 +293,36 @@ public final class HomeCutover implements DeployedApp {
         remember(job.appName());
     }
 
+    /**
+     * 앱을 지웠다. 이 앱의 배포 기억과 거점을 잊는다 (재시작 때 되살리는 파일도 지운다).
+     *
+     * @throws IllegalStateException 이 앱의 거점을 옮기는 중이다
+     */
+    public synchronized void forget(String app) {
+        DeployJob current = job;
+        boolean mine = app != null && (app.equals(appName) || (current != null && app.equals(current.appName())));
+        if (!mine) {
+            return;
+        }
+        if (phase == Phase.MOVING_TO_CLOUD || phase == Phase.MOVING_TO_ONPREM) {
+            throw new IllegalStateException("거점을 옮기는 중이라 지울 수 없습니다");
+        }
+        job = null;
+        cloudJobId = null;
+        appName = null;
+        cnameContent = "";
+        phase = Phase.ONPREM;
+        dns.holdDns(false);
+        if (memory != null) {
+            try {
+                Files.deleteIfExists(memory.resolve("cutover-app.txt"));
+            } catch (IOException e) {
+                event("app file not removed: " + e.getMessage());
+            }
+        }
+        event("removed: " + app);
+    }
+
     public synchronized void noteCloud(DeployJob job) {
         this.cloudJobId = job.id();
     }

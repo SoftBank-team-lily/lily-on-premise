@@ -28,16 +28,18 @@ public class AgentService implements JobSink {
     private final JobRunner runner;
     private final CloudBurst burst;
     private final HomeCutover cutover;
+    private final AppRemoval removal;
     private final Object gate = new Object();
 
     public AgentService(JobStore store, OnPremPipeline pipeline, ControlSession session, JobRunner runner,
-                        CloudBurst burst, HomeCutover cutover) {
+                        CloudBurst burst, HomeCutover cutover, AppRemoval removal) {
         this.store = store;
         this.pipeline = pipeline;
         this.session = session;
         this.runner = runner;
         this.burst = burst;
         this.cutover = cutover;
+        this.removal = removal;
         cutover.publisher(this::publish);
     }
 
@@ -124,6 +126,38 @@ public class AgentService implements JobSink {
             }
         });
         return status;
+    }
+
+    @Override
+    public JobRecord remove(String app, String id, boolean database) {
+        if (app == null || !app.matches("[a-z][a-z0-9-]{0,30}")) {
+            throw new IllegalArgumentException("app 이 올바르지 않습니다");
+        }
+        String idValue = id == null || id.isBlank()
+                ? "d" + UUID.randomUUID().toString().replace("-", "").substring(0, 7)
+                : id;
+        if (!idValue.matches("[a-z0-9][a-z0-9-]{0,40}")) {
+            throw new IllegalArgumentException("id 가 올바르지 않습니다");
+        }
+        if (store.find(idValue).isPresent()) {
+            throw new IllegalArgumentException("이미 받은 잡입니다: " + idValue);
+        }
+        JobRecord record = new JobRecord(idValue, app);
+        record.update(JobRecord.Status.QUEUED, "remove: " + app + (database ? " database" : ""));
+        publish(record);
+        runner.run(() -> {
+            // 배포·롤백·거점 전환과 같은 잠금. 도는 중이면 끝난 뒤에 지운다
+            synchronized (gate) {
+                try {
+                    record.update(JobRecord.Status.SUCCEEDED, "removed: " + String.join(", ", removal.remove(app, database)));
+                } catch (RuntimeException e) {
+                    String message = e.getMessage() == null ? "remove failed" : e.getMessage();
+                    record.update(JobRecord.Status.FAILED, "failed: " + message);
+                }
+                publish(record);
+            }
+        });
+        return record;
     }
 
     public HomeCutover.Status homeStatus() {
