@@ -520,7 +520,7 @@ lily-frontend `/account` 에서 배포 위치를 "내 PC" 로 고르고 "연결 
 docker rm -f lily-agent; docker run -d --name lily-agent --restart unless-stopped --network host -v //var/run/docker.sock:/var/run/docker.sock -e CONTROL_PLANE_URL="wss://builder.apps.lilycloud.kr/api/agents/connect?token=<화면의 토큰>" public.ecr.aws/x3w9c9r7/lily-agent
 ```
 
-* 이미지는 공개 레지스트리에 있어 레포 클론·로컬 빌드가 없습니다 (`scripts/publish-agent.sh` 로 올립니다)
+* 이미지는 공개 레지스트리에 있어 레포 클론·로컬 빌드가 없습니다 (`scripts/publish-agent.sh` 로 올립니다). 한 태그에 linux/amd64 와 linux/arm64 가 같이 있어 Apple Silicon Mac 도 에뮬레이션 없이 받습니다. Mac 실기 검증은 아직 하지 않았습니다
 * PowerShell, bash(Git Bash 포함)에서 그대로 실행됩니다. Docker Desktop 의 host networking 설정은 켜지 않아도 됩니다 (에이전트와 앱 컨테이너는 Docker VM 안에서 서로 닿습니다)
 * 화면에 "연결됨" 이 보이면 레포를 등록합니다. 상태는 목록에 "내 PC · 배포 중 → 배포 완료" 로 바뀌고 "앱 열기" 가 생깁니다
 * 에이전트 하나는 앱 하나만 띄웁니다. 화면에서도 내 PC 프로젝트는 계정당 하나입니다

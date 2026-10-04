@@ -1,8 +1,9 @@
 # 에이전트 이미지: JRE + git + ssh + docker CLI + cloudflared (호스트 Docker 소켓 사용)
 # 저장소 루트에서: docker build -f test/burst/agent.Dockerfile -t lily-onprem-agent:burst .
+# amd64·arm64 두 벌은 scripts/publish-agent.sh 가 --platform 으로 만든다. jar 는 빌드하는 머신에서 한 번만 만든다
 # 사용자용 공개 이미지는 scripts/publish-agent.sh 가 이 파일로 만든다 (public.ecr.aws/x3w9c9r7/lily-agent)
 # DB 터널 개인키는 이미지에 넣지 않는다. /keys 로 마운트하면 권한 600 으로 복사해서 쓴다
-FROM eclipse-temurin:21-jdk AS build
+FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk AS build
 WORKDIR /src
 COPY . .
 RUN ./gradlew -q bootJar -x test --no-daemon
