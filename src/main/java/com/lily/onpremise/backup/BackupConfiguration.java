@@ -25,6 +25,8 @@ import java.util.concurrent.Executor;
 @Configuration
 public class BackupConfiguration {
 
+    static final String RESTARTED = "에이전트가 다시 떠서 배포 정보가 없다 (한 번 다시 배포하면 백업을 이어 간다)";
+
     @Bean(destroyMethod = "close")
     BackupScheduler backupScheduler(BackupProperties properties, AgentProperties agent, HomeCutover homes,
                                     LocalExposure exposure, ContainerStats stats, Commands commands, ObjectMapper json) {
@@ -53,13 +55,16 @@ public class BackupConfiguration {
 
     static BackupScheduler.Deployed deployed(HomeCutover homes, PgrollWindows windows) {
         DeployJob job = homes.job();
-        if (job == null) {
-            return null;
-        }
-        String app = job.appName();
         boolean moving = homes.moving();
         boolean onPc = !moving && homes.localRollbackAllowed();
-        return new BackupScheduler.Deployed(app, onPc, skip(job, moving, onPc, homes, windows));
+        if (job == null) {
+            // 배포 잡은 메모리에만 있다 (git 토큰이 들어 있어 남기지 않는다). 에이전트가 다시 뜨면 기억한 앱 이름으로
+            // 요청 수만 이어 세고, 백업은 다음 배포부터 한다
+            String remembered = homes.status().appName();
+            return remembered == null || remembered.isBlank() ? null
+                    : new BackupScheduler.Deployed(remembered, onPc, RESTARTED);
+        }
+        return new BackupScheduler.Deployed(job.appName(), onPc, skip(job, moving, onPc, homes, windows));
     }
 
     /** 백업하지 않는 이유. 대상이면 null */
@@ -96,7 +101,7 @@ public class BackupConfiguration {
             throw new IllegalStateException("백업하려던 앱이 바뀌었다: " + app);
         }
         Map<String, String> rds = move.rdsEnv(job);
-        move.toRemote(app, rds);
+        move.backupToRemote(app, rds);
     }
 
     private static Path workspace(AgentProperties agent) {

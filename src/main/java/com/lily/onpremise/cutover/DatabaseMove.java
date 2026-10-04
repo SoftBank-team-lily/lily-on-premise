@@ -17,6 +17,11 @@ public interface DatabaseMove {
     /** 이 PC DB 의 스키마와 데이터로 RDS DB 를 덮어쓴다 */
     void toRemote(String appName, Map<String, String> rdsEnv);
 
+    /** 정기 백업. {@link #toRemote} 와 같지만 앱이 계속 쓰는 중이라 행 수는 비교하지 않는다 */
+    default void backupToRemote(String appName, Map<String, String> rdsEnv) {
+        toRemote(appName, rdsEnv);
+    }
+
     /** 켜면 이 PC 프록시가 모든 요청에 503 을 돌려주고, 처리 중인 요청이 끝날 때까지 기다린다 */
     void pause(boolean paused);
 }

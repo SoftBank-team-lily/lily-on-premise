@@ -59,6 +59,11 @@ public final class AgentDatabaseMove implements DatabaseMove {
     }
 
     @Override
+    public void backupToRemote(String appName, Map<String, String> rdsEnv) {
+        transfer.backupToRemote(appName, DatabaseTransfer.fromEnv(rdsEnv), databases.prepareLocalPgrollCopy(appName));
+    }
+
+    @Override
     public void pause(boolean paused) {
         proxy.pause(paused);
         if (!paused) {

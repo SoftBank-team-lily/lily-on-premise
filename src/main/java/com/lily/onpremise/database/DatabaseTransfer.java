@@ -59,12 +59,16 @@ public final class DatabaseTransfer {
     /** 덤프 범위. 앱 스키마와 pgroll 버전 스키마(뷰) */
     private static final String SCHEMAS = "-n public -n 'public_*'";
 
-    /** 양쪽의 테이블 목록과 테이블마다 행 수가 같아야 한다 (앱 스키마와 pgroll 이력) */
-    private static final String VERIFY = """
+    /** 양쪽의 테이블 목록이 같아야 한다 (앱 스키마와 pgroll 이력) */
+    private static final String VERIFY_TABLES = """
             tables="select quote_ident(schemaname)||'.'||quote_ident(tablename) from pg_tables where schemaname = 'public' or (schemaname = 'pgroll' and tablename = 'migrations') order by 1"
             a=$(src -At -c "$tables")
             b=$(dst -At -c "$tables")
             if [ "$a" != "$b" ]; then echo "lily-verify: 테이블 목록이 다르다"; exit 3; fi
+            """;
+
+    /** 테이블 목록에 더해 테이블마다 행 수가 같아야 한다. 쓰기를 멈춘 거점 전환에서만 맞다 */
+    private static final String VERIFY = VERIFY_TABLES + """
             for t in $a; do
               x=$(src -At -c "select count(*) from $t")
               y=$(dst -At -c "select count(*) from $t")
@@ -116,6 +120,18 @@ public final class DatabaseTransfer {
      * @param pgroll PC DB 가 pgroll 을 쓴다. RDS 에는 미리 pgroll 을 켜 두고 이력 행도 옮긴다
      */
     public void toRemote(String appName, DatabaseCredentials remote, boolean pgroll) {
+        toRemote(appName, remote, pgroll, VERIFY);
+    }
+
+    /**
+     * 정기 백업. {@link #toRemote} 와 같이 한 트랜잭션으로 덮어쓰지만, 앱이 계속 쓰는 중이라 행 수는 비교하지 않는다
+     * (덤프 시작 뒤 쓴 행은 사본에 없는 것이 맞다). 테이블 목록만 확인한다.
+     */
+    public void backupToRemote(String appName, DatabaseCredentials remote, boolean pgroll) {
+        toRemote(appName, remote, pgroll, VERIFY_TABLES + "echo \"lily-verify: ok (tables)\"\n");
+    }
+
+    private void toRemote(String appName, DatabaseCredentials remote, boolean pgroll, String verify) {
         requirePostgres(remote);
         String script = FUNCTIONS + """
                 remote -c "select 1" > /dev/null
@@ -130,7 +146,7 @@ public final class DatabaseTransfer {
                 } | remote
                 src() { local_admin -d "$LOCAL_DB" "$@"; }
                 dst() { remote "$@"; }
-                """.replace("{SCHEMAS}", SCHEMAS) + VERIFY;
+                """.replace("{SCHEMAS}", SCHEMAS) + verify;
         run(script, localName(appName), remote, "PC DB 를 RDS 로 옮기지 못했다", "PGROLL=" + (pgroll ? "1" : "0"));
     }
 

@@ -92,6 +92,19 @@ class DatabaseTransferTest {
     }
 
     @Test
+    void 정기_백업은_같은_한_트랜잭션이지만_앱이_계속_쓰므로_행_수는_비교하지_않는다() {
+        transfer.backupToRemote("blog", RDS, false);
+        transfer.toRemote("blog", RDS, false);
+
+        String backup = runs.get(0).get(runs.get(0).size() - 1);
+        String move = runs.get(1).get(runs.get(1).size() - 1);
+        assertThat(backup).contains("echo 'BEGIN;'", "echo 'COMMIT;'", "테이블 목록이 다르다", "lily-verify: ok (tables)");
+        assertThat(backup).doesNotContain("행 수가 다르다", "select count(*)");
+        // 거점 전환은 쓰기를 멈춘 뒤라 행 수까지 맞춘다
+        assertThat(move).contains("행 수가 다르다");
+    }
+
+    @Test
     void PC_로_옮길_때는_백업_이름을_돌려준다() {
         String backup = transfer.toLocal("my-blog", RDS);
 
