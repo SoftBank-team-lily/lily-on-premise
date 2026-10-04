@@ -66,6 +66,20 @@ class HomeCutoverTest {
     }
 
     @Test
+    void 컨트롤_플레인이_이_앱의_쓰기를_멈추고_다시_열고_다른_앱이나_옮기는_중에는_거절한다() {
+        cutover.pauseWrites("blog", true);
+        cutover.pauseWrites("blog", false);
+        assertThat(move.calls).containsExactly("pause:true", "pause:false");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> cutover.pauseWrites("other", true))
+                .isInstanceOf(IllegalArgumentException.class);
+        cutover.begin("blog", "cloud", false);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> cutover.pauseWrites("blog", true))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(move.calls).containsExactly("pause:true", "pause:false");
+    }
+
+    @Test
     void DB_를_RDS_로_옮기며_클라우드로_간다() {
         cutover.note(local(), true);
 

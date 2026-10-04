@@ -283,7 +283,7 @@ public class WebSocketControlSession implements ControlSession {
             hello.putAll(platform.getObject().hello());
             // 이 에이전트가 받는 메시지. 없으면 컨트롤 플레인은 버스팅 설정을 보내지 않는다
             hello.put("features", java.util.List.of("burst", "home", "home-cancel", "remediate", "remove", "pgroll",
-                    "cancel", "cloud-target"));
+                    "cancel", "cloud-target", "pause"));
             session.sendMessage(new TextMessage(mapper.writeValueAsString(hello)));
             log.info("control plane connected: agent={}", identity.id());
             Thread.ofVirtual().name("lily-burst-state").start(() -> sendState(session));
@@ -325,6 +325,20 @@ public class WebSocketControlSession implements ControlSession {
                     if (schema != null) {
                         log.info("schema complete received: app={} result={}", app, schema.completeNow(app));
                     }
+                    return;
+                }
+                if ("pause".equals(type)) {
+                    // 앱 DB 를 다른 클라우드로 옮기는 동안 쓰기를 멈춘다. 멈출 때는 진행 중인 요청을 기다리므로 소켓 스레드 밖에서 한다
+                    String app = node.path("app").asText("");
+                    boolean paused = node.path("paused").asBoolean(false);
+                    Thread.ofVirtual().name("lily-pause").start(() -> {
+                        try {
+                            cutover.getObject().pauseWrites(app, paused);
+                            log.info("pause received: app={} paused={}", app, paused);
+                        } catch (RuntimeException e) {
+                            log.warn("pause rejected: app={} paused={} reason={}", app, paused, e.getMessage());
+                        }
+                    });
                     return;
                 }
                 if ("cancel".equals(type)) {

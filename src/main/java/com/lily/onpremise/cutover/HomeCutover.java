@@ -227,6 +227,29 @@ public final class HomeCutover implements DeployedApp {
         this.databaseMove = move;
     }
 
+    /**
+     * 컨트롤 플레인이 이 앱의 DB 를 다른 클라우드로 옮기는 동안 쓰기를 멈춘다 (프록시 점검, 503 maintenance).
+     * 멈출 때는 진행 중인 요청이 끝나기를 잠깐 기다린다. 거점이 내 PC 이고 옮기는 중이 아닐 때만 된다
+     *
+     * @throws IllegalArgumentException 이 에이전트의 앱이 아니다
+     * @throws IllegalStateException    거점을 옮기는 중이거나 쓰기를 멈출 수단이 없다
+     */
+    public void pauseWrites(String app, boolean paused) {
+        DeployJob current = job;
+        if (current == null || !current.appName().equals(app)) {
+            throw new IllegalArgumentException("이 에이전트의 앱이 아닙니다: " + app);
+        }
+        if (paused && phase != Phase.ONPREM) {
+            throw new IllegalStateException("거점이 내 PC 일 때만 쓰기를 멈춥니다 (지금: " + phase + ")");
+        }
+        DatabaseMove move = databaseMove;
+        if (move == null) {
+            throw new IllegalStateException("쓰기를 멈출 수단이 없습니다");
+        }
+        move.pause(paused);
+        event("database: 쓰기 " + (paused ? "멈춤 (컨트롤 플레인)" : "재개"));
+    }
+
     public BurstClient client() {
         return client;
     }
