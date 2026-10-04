@@ -142,6 +142,16 @@ public final class LocalExposure implements TrafficSwitch, AutoCloseable {
     }
 
     @Override
+    public void split(int port, int percent) {
+        proxy.split(port, percent);
+    }
+
+    @Override
+    public UpstreamProxy.SplitCount splitCount() {
+        return proxy.splitCount();
+    }
+
+    @Override
     public int upstreamPort() {
         return proxy.upstreamPort();
     }

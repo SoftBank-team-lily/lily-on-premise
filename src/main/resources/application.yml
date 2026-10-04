@@ -53,6 +53,10 @@ lily:
       memory: ${AGENT_SANDBOX_MEMORY:2g}
       cpus: ${AGENT_SANDBOX_CPUS:1}
       pids: ${AGENT_SANDBOX_PIDS:1024}
+    # 다음 배포: 사용자 요청을 칸마다 새 슬롯으로 옮기고 새 슬롯 5xx 가 많으면 되돌린다. 칸이 100 이면 판정 뒤 한 번에 옮긴다 (블루그린)
+    canary:
+      step-percent: ${AGENT_CANARY_STEP_PERCENT:20}
+      step-seconds: ${AGENT_CANARY_STEP_SECONDS:30}
     # 로컬 5xx 가 연속이면 슬롯 로그로 수정 PR 사건을 올린다. false 면 횟수만 세고 로그는 읽지 않는다
     remediate:
       enabled: ${AGENT_REMEDIATE_ENABLED:false}

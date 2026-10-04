@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *       켜져 있을 때 그 요청을 클라우드 Ingress 로 보낸다. 헤더는 그대로 넘기므로 Host 는 공개 주소다</li>
  *   <li>점검({@link #pause}): 거점 전환으로 DB 를 옮기는 동안 모든 요청에 503 을 돌려준다</li>
  *   <li>클라우드 비율({@link #cloudShare}): 넘김 대상이 켜져 있으면 로컬 여유와 상관없이 요청마다 그 확률로 클라우드에 보낸다</li>
+ *   <li>카나리({@link #split}): 로컬로 가는 요청 중 그 확률만큼 새 슬롯으로 보낸다. {@link #switchTo} 하면 풀린다</li>
  * </ul>
  *
  * 앞단(cloudflared)은 keep-alive 로 연결 몇 개에 요청을 몰아 보내므로, 연결 단위로 나누면 분배를 정할 수 없다.
@@ -57,6 +58,14 @@ public final class UpstreamProxy implements AutoCloseable {
     private volatile InetSocketAddress overflow;
     /** 넘김 대상이 있을 때 요청마다 클라우드로 보내는 비율 (0~100) */
     private volatile int cloudPercent;
+    /** 카나리 중인 새 슬롯 포트와 그 슬롯으로 보내는 비율. 포트 0 이면 나누지 않는다 */
+    private volatile int canaryPort;
+    private volatile int canaryPercent;
+    /** 카나리를 건 뒤 이전 슬롯 / 새 슬롯이 돌려준 응답 수와 그중 5xx */
+    private final AtomicLong stableSeen = new AtomicLong();
+    private final AtomicLong stableErrors = new AtomicLong();
+    private final AtomicLong canarySeen = new AtomicLong();
+    private final AtomicLong canaryErrors = new AtomicLong();
     /** 로컬 / 클라우드에서 처리 중인 요청 수 */
     private final AtomicInteger localActive = new AtomicInteger();
     private final AtomicInteger remoteActive = new AtomicInteger();
@@ -103,7 +112,36 @@ public final class UpstreamProxy implements AutoCloseable {
         if (port < 0 || port > 65535) {
             throw new IllegalArgumentException("upstream port");
         }
+        this.canaryPort = 0;
+        this.canaryPercent = 0;
         this.upstreamPort = port;
+    }
+
+    /**
+     * 로컬로 가는 요청의 percent% 를 port 로 보낸다. 포트가 바뀌면 응답 수를 0 부터 다시 센다.
+     *
+     * @param port 새 슬롯 포트. 0 이면 나누지 않고 모두 {@link #upstreamPort} 로 보낸다
+     */
+    public void split(int port, int percent) {
+        if (port < 0 || port > 65535) {
+            throw new IllegalArgumentException("canary port");
+        }
+        if (percent < 0 || percent > 100) {
+            throw new IllegalArgumentException("canary percent");
+        }
+        if (port != canaryPort) {
+            this.canaryPercent = 0;
+            stableSeen.set(0);
+            stableErrors.set(0);
+            canarySeen.set(0);
+            canaryErrors.set(0);
+            this.canaryPort = port;
+        }
+        this.canaryPercent = port == 0 ? 0 : percent;
+    }
+
+    public SplitCount splitCount() {
+        return new SplitCount(stableSeen.get(), stableErrors.get(), canarySeen.get(), canaryErrors.get());
     }
 
     public int upstreamPort() {
@@ -177,6 +215,12 @@ public final class UpstreamProxy implements AutoCloseable {
                            long fallbackTotal) {
     }
 
+    /** 카나리를 건 뒤 로컬 슬롯이 돌려준 응답 수. 클라우드로 넘긴 요청과 프록시가 만든 503 은 빠진다 */
+    public record SplitCount(long stable, long stableErrors, long canary, long canaryErrors) {
+
+        public static final SplitCount NONE = new SplitCount(0, 0, 0, 0);
+    }
+
     private void acceptLoop() {
         while (open) {
             try {
@@ -212,11 +256,15 @@ public final class UpstreamProxy implements AutoCloseable {
                     reply(out, 503, "maintenance");
                     return;
                 }
+                int canary = canaryPort;
+                if (canary != 0 && ThreadLocalRandom.current().nextInt(100) < canaryPercent) {
+                    port = canary;
+                }
                 Slot slot = acquire();
                 boolean keep;
                 long started = System.nanoTime();
                 try {
-                    keep = exchange(client, request, in, out, port, slot, upstreams);
+                    keep = exchange(client, request, in, out, port, canary, slot, upstreams);
                 } finally {
                     if (slot.remote == null) {
                         localLatency.record(System.currentTimeMillis(), (System.nanoTime() - started) / 1_000_000);
@@ -240,7 +288,7 @@ public final class UpstreamProxy implements AutoCloseable {
      * @return 같은 클라이언트 연결로 다음 요청을 받을 수 있으면 true
      */
     private boolean exchange(Socket client, HttpHead request, InputStream in, OutputStream out,
-                             int port, Slot slot, Upstreams upstreams) throws IOException {
+                             int port, int canary, Slot slot, Upstreams upstreams) throws IOException {
         InetSocketAddress local = new InetSocketAddress(LOOPBACK, port);
         Upstream upstream = slot.remote != null ? upstreams.get(slot.remote) : null;
         if (slot.remote != null && upstream == null) {
@@ -299,7 +347,14 @@ public final class UpstreamProxy implements AutoCloseable {
             }
         }
         if (slot.remote == null) {
-            localTraffic.record(System.currentTimeMillis(), response.status() >= 500);
+            boolean error = response.status() >= 500;
+            localTraffic.record(System.currentTimeMillis(), error);
+            if (canary != 0) {
+                (port == canary ? canarySeen : stableSeen).incrementAndGet();
+                if (error) {
+                    (port == canary ? canaryErrors : stableErrors).incrementAndGet();
+                }
+            }
         }
         response.writeTo(out);
 

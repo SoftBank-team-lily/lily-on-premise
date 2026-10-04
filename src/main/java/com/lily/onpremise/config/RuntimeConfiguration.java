@@ -255,6 +255,7 @@ public class RuntimeConfiguration {
             JobCancels cancels) {
         return new OnPremPipeline(
                 workspace, analyzer, runtime, readiness, exposure, publicAddress, slots,
-                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes, pgroll, cancels);
+                properties.bluePort(), properties.greenPort(), databases, schema, judge, homes, pgroll, cancels,
+                new OnPremPipeline.Canary(properties.canary().stepPercent(), properties.canary().stepSeconds()));
     }
 }

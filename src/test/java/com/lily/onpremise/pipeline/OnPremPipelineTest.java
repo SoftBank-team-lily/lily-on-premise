@@ -5,6 +5,7 @@ import com.lily.onpremise.expose.CandidateJudge;
 import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
 import com.lily.onpremise.expose.TrafficSwitch;
+import com.lily.onpremise.expose.UpstreamProxy;
 import com.lily.onpremise.pipeline.DatabaseAccess;
 import com.lily.onpremise.schema.SchemaApply;
 import com.lily.onpremise.job.DeployJob;
@@ -237,6 +238,49 @@ class OnPremPipelineTest {
     }
 
     @Test
+    void 카나리는_이전_슬롯이_있을_때만_칸씩_새_슬롯으로_옮긴_뒤_전환한다() throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
+        OnPremPipeline canaryPipeline = canaryPipeline();
+        traffic.count = new UpstreamProxy.SplitCount(40, 0, 10, 0);
+
+        run(canaryPipeline, job("blog", null, null));
+        assertThat(traffic.splits).isEmpty();
+        JobRecord second = run(canaryPipeline, new DeployJob(
+                "job2", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                null, null, null, Map.of()).normalize());
+
+        assertThat(second.getStatus()).isEqualTo(JobRecord.Status.SUCCEEDED);
+        assertThat(traffic.splits).containsExactly("18081:40", "18081:80");
+        assertThat(traffic.port).isEqualTo(18081);
+        assertThat(runtime.calls).contains("stop blog-blue");
+    }
+
+    @Test
+    void 카나리_중_새_슬롯_5xx_가_많으면_나누기를_풀고_후보를_지운다() throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
+        OnPremPipeline canaryPipeline = canaryPipeline();
+
+        run(canaryPipeline, job("blog", null, null));
+        traffic.count = new UpstreamProxy.SplitCount(40, 0, 10, 3);
+        JobRecord second = run(canaryPipeline, new DeployJob(
+                "job2", "https://github.com/acme/blog", "main", null, "blog", 8080,
+                null, null, null, Map.of()).normalize());
+
+        assertThat(second.getStatus()).isEqualTo(JobRecord.Status.FAILED);
+        assertThat(second.getLogs()).anyMatch(line -> line.contains("canary failed, traffic back to previous"));
+        assertThat(traffic.splits).containsExactly("18081:40", "0:0");
+        assertThat(traffic.port).isEqualTo(18080);
+        assertThat(runtime.calls).contains("stop blog-green").doesNotContain("stop blog-blue");
+    }
+
+    private OnPremPipeline canaryPipeline() {
+        return new OnPremPipeline(
+                job -> root, new StackAnalyzer(), runtime, ready, traffic, addresses, slots, 18080, 18081,
+                DatabaseAccess.NONE, SchemaApply.NONE, CandidateJudge.PASS, DeployedApp.IGNORE, PgrollStep.NONE,
+                JobCancel.NONE, new OnPremPipeline.Canary(40, 0));
+    }
+
+    @Test
     void 이전_슬롯이_있으면_전환_전에_후보를_거절하면_프록시는_그대로다() throws Exception {
         Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }");
         AtomicInteger judged = new AtomicInteger();
@@ -336,6 +380,18 @@ class OnPremPipelineTest {
     static final class FakeSwitch implements TrafficSwitch {
         int port = -1;
         boolean fail;
+        final List<String> splits = new ArrayList<>();
+        UpstreamProxy.SplitCount count = UpstreamProxy.SplitCount.NONE;
+
+        @Override
+        public void split(int canaryPort, int percent) {
+            splits.add(canaryPort + ":" + percent);
+        }
+
+        @Override
+        public UpstreamProxy.SplitCount splitCount() {
+            return count;
+        }
 
         @Override
         public void route(int upstreamPort) {
