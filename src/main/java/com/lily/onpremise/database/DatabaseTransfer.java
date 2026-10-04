@@ -109,17 +109,25 @@ public final class DatabaseTransfer {
     }
 
     /**
+     * 비우기와 채우기는 RDS 에서 한 트랜잭션이다. 덤프가 중간에 끊기거나 실패하면 RDS 는 직전 사본 그대로다
+     * (장애 대비 사본이 빈 채로 남지 않는다). {@code psql --single-transaction} 은 입력이 끝나면 커밋하므로 쓰지 않고,
+     * 덤프가 끝까지 성공했을 때만 {@code COMMIT} 을 보낸다. 보내지 못하고 연결이 닫히면 서버가 되돌린다.
+     *
      * @param pgroll PC DB 가 pgroll 을 쓴다. RDS 에는 미리 pgroll 을 켜 두고 이력 행도 옮긴다
      */
     public void toRemote(String appName, DatabaseCredentials remote, boolean pgroll) {
         requirePostgres(remote);
         String script = FUNCTIONS + """
                 remote -c "select 1" > /dev/null
-                remote -c "$(reset_public)"
-                pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl {SCHEMAS} "$LOCAL_DB" | no_public | remote
-                if [ "$PGROLL" = "1" ]; then
-                  pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl --data-only -t pgroll.migrations "$LOCAL_DB" | remote
-                fi
+                {
+                  echo 'BEGIN;'
+                  reset_public
+                  pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl {SCHEMAS} "$LOCAL_DB" | no_public || exit 1
+                  if [ "$PGROLL" = "1" ]; then
+                    pg_dump -U postgres -p "$LOCAL_PORT" --no-owner --no-acl --data-only -t pgroll.migrations "$LOCAL_DB" || exit 1
+                  fi
+                  echo 'COMMIT;'
+                } | remote
                 src() { local_admin -d "$LOCAL_DB" "$@"; }
                 dst() { remote "$@"; }
                 """.replace("{SCHEMAS}", SCHEMAS) + VERIFY;

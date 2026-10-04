@@ -68,6 +68,30 @@ class DatabaseTransferTest {
     }
 
     @Test
+    void RDS_를_비우고_채우는_일은_한_트랜잭션이고_덤프가_끝까지_성공해야_커밋한다() {
+        transfer.toRemote("blog", RDS, true);
+
+        List<String> command = runs.get(0);
+        String script = command.get(command.size() - 1);
+        int begin = script.indexOf("echo 'BEGIN;'");
+        int reset = script.indexOf("reset_public\n", begin);
+        int dump = script.indexOf("pg_dump -U postgres", reset);
+        int history = script.indexOf("-t pgroll.migrations", dump);
+        int commit = script.indexOf("echo 'COMMIT;'", history);
+        int send = script.indexOf("} | remote", commit);
+        assertThat(begin).isNotNegative();
+        assertThat(List.of(reset, dump, history, commit, send)).allMatch(i -> i > begin);
+        assertThat(reset).isLessThan(dump);
+        assertThat(dump).isLessThan(history);
+        assertThat(history).isLessThan(commit);
+        assertThat(commit).isLessThan(send);
+        // 비우기를 따로 보내면 그 순간 커밋된다
+        assertThat(script).doesNotContain("remote -c \"$(reset_public)\"");
+        // 덤프가 실패하면 COMMIT 을 보내지 않고 끝낸다 (연결이 닫히면 서버가 되돌린다)
+        assertThat(script.substring(dump, commit)).contains("|| exit 1");
+    }
+
+    @Test
     void PC_로_옮길_때는_백업_이름을_돌려준다() {
         String backup = transfer.toLocal("my-blog", RDS);
 
