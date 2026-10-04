@@ -30,6 +30,8 @@ public final class BackupScheduler implements AutoCloseable {
     static final int FAILURES_BEFORE_LONG_RETRY = 3;
     /** 메모리에 둘 최근 분 수 */
     private static final int KEEP_MINUTES = 60;
+    private static final java.time.format.DateTimeFormatter LOG_TIME =
+            java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
 
     /**
      * 지금 이 PC 에 배포된 앱.
@@ -77,6 +79,7 @@ public final class BackupScheduler implements AutoCloseable {
     private Instant retryAfter;
     private volatile boolean running;
     private volatile Snapshot last;
+    private String lastLogged;
 
     /**
      * @param requests 프록시가 이 PC 로 보낸 최근 60초 요청 수
@@ -142,6 +145,7 @@ public final class BackupScheduler implements AutoCloseable {
                     reading.cpuPercent(), reading.activeConnections()), policy);
         }
 
+        logDecision(result, plan, minutes);
         switch (result.action()) {
             case SKIP -> {
                 state = state.withRecord(new BackupRecord(now, now, Outcome.SKIPPED, false, result.reason()))
@@ -183,6 +187,26 @@ public final class BackupScheduler implements AutoCloseable {
 
     public boolean running() {
         return running;
+    }
+
+    /**
+     * 판정이 바뀔 때만 한 줄 남긴다 (매분 같은 줄을 찍지 않는다). SKIP·RUN·FORCE 는 일이 일어난 것이라 늘 남긴다.
+     * 예: {@code backup decision: app=memo WAIT 후보 창 밖 | stage=2 window=10-05 03:00~04:00 KST deadline=10-05 11:12 threshold=5 last=[0, 1, 0]}
+     */
+    private void logDecision(BackupDecision.Result result, BackupWindow.Plan plan, List<Integer> minutes) {
+        // 사유 안의 숫자("분당 57건")는 매분 바뀌므로 괄호 앞까지만 비교한다
+        String reason = result.reason();
+        int paren = reason.indexOf(" (");
+        String key = app + "|" + result.action() + "|" + (paren < 0 ? reason : reason.substring(0, paren));
+        boolean event = result.action() == Action.SKIP || result.action() == Action.RUN || result.action() == Action.FORCE;
+        if (!event && key.equals(lastLogged)) {
+            return;
+        }
+        lastLogged = key;
+        log.info("backup decision: app={} {} {} | stage={} window={}~{} {} deadline={} threshold={} last={}",
+                app, result.action(), result.reason(), plan.stage(), LOG_TIME.format(plan.start()),
+                LOG_TIME.format(plan.end()), policy.zone().getId(),
+                LOG_TIME.format(plan.deadline().atZone(policy.zone())), Math.round(plan.threshold()), minutes);
     }
 
     /** 앱이 바뀌었으면 그 앱의 상태를 읽는다 (새 배포, 에이전트 재시작) */
