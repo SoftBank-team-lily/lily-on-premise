@@ -231,6 +231,16 @@ public final class HomeCutover implements DeployedApp {
         return client;
     }
 
+    /** 이 PC 에 마지막으로 배포한 잡. 없으면 null (정기 백업이 대상 앱을 고를 때 쓴다) */
+    public DeployJob job() {
+        return job;
+    }
+
+    /** 앱 DB 를 옮기는 방법. 연결이 없으면 null (정기 백업도 같은 길로 RDS 에 올린다) */
+    public DatabaseMove databaseMove() {
+        return databaseMove;
+    }
+
     /** 전환에 필요한 연결이 다 있다. 잡과 거점에 따른 거절은 {@link #begin} 이 한다 */
     public boolean movable() {
         return !cloudOrigin.isBlank() && client != null && dns.configured();

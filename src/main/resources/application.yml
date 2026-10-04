@@ -48,6 +48,16 @@ lily:
     # 거점 전환: 공개 주소의 CNAME 내용물만 온프레 터널과 이 호스트 사이에서 바꾼다. IP 면 거절한다
     cutover:
       cloud-origin: ${CUTOVER_CLOUD_ORIGIN:}
+    # 하이브리드 앱(DB 가 이 PC)의 DB 를 클라우드 사본으로 정기 백업한다. 주기(최대 간격) 안에서 요청이 가장 적은 때에 하고,
+    # 끝내 한가하지 않으면 마감에 한다. 주기 0 이면 끈다. 요청 통계는 작업 폴더 backup/ 에만 둔다
+    backup:
+      interval-hours: ${BACKUP_INTERVAL_HOURS:24}
+      quiet-minutes: ${BACKUP_QUIET_MINUTES:10}
+      min-threshold: ${BACKUP_MIN_THRESHOLD:5}
+      threshold-factor: ${BACKUP_THRESHOLD_FACTOR:1.5}
+      max-cpu-percent: ${BACKUP_MAX_CPU_PERCENT:50}
+      max-active-connections: ${BACKUP_MAX_ACTIVE_CONNECTIONS:2}
+      zone: ${BACKUP_ZONE:Asia/Seoul}
     # 사용자 레포를 이 PC 에서 빌드·실행할 때의 한도. 프로세스 수는 스레드를 포함한다
     sandbox:
       memory: ${AGENT_SANDBOX_MEMORY:2g}
