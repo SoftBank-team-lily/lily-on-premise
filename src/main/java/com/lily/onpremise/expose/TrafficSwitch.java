@@ -12,4 +12,12 @@ public interface TrafficSwitch {
     int upstreamPort();
 
     String publicUrl();
+
+    /** 요청의 percent% 를 port 로 보낸다. port 0 이면 나누지 않는다. {@link #route} 하면 풀린다 */
+    default void split(int port, int percent) {
+    }
+
+    default UpstreamProxy.SplitCount splitCount() {
+        return UpstreamProxy.SplitCount.NONE;
+    }
 }

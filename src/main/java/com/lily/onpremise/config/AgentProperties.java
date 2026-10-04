@@ -29,7 +29,18 @@ public record AgentProperties(
         /** 공개 주소의 CNAME 을 클라우드 오리진으로 바꿀 때 쓴다. 비우면 거점 전환을 거절한다 */
         @DefaultValue Cutover cutover,
         /** 사용자 레포를 이 PC 에서 빌드·실행할 때의 한도 */
-        @DefaultValue Sandbox sandbox) {
+        @DefaultValue Sandbox sandbox,
+        /** 다음 배포에서 사용자 요청을 새 슬롯으로 옮기는 칸. 클라우드 canary 와 같은 20% × 30초 */
+        @DefaultValue Canary canary) {
+
+    /**
+     * @param stepPercent 칸마다 올리는 새 슬롯 비율. 0 이하이거나 100 이상이면 판정 뒤 한 번에 옮긴다 (블루그린)
+     * @param stepSeconds 칸마다 새 슬롯 5xx 를 모으는 시간
+     */
+    public record Canary(
+            @DefaultValue("20") int stepPercent,
+            @DefaultValue("30") int stepSeconds) {
+    }
 
     /**
      * 플랫폼 연결. 컨트롤 플레인 주소만 있고 Cloudflare 자격(API 토큰, 터널 토큰)이 없으면

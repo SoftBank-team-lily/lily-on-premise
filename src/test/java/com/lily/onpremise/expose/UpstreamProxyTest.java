@@ -92,6 +92,43 @@ class UpstreamProxyTest {
     }
 
     @Test
+    void 카나리_비율만큼_새_슬롯으로_보내고_슬롯별_5xx_를_세며_전환하면_풀린다() throws Exception {
+        UpstreamProxy proxy = new UpstreamProxy(0);
+        proxy.start();
+        HttpServer stable = listen("old");
+        HttpServer canary = listen("new", 500);
+        try {
+            proxy.switchTo(stable.getAddress().getPort());
+            proxy.split(canary.getAddress().getPort(), 0);
+            assertThat(get(proxy.port()).body()).isEqualTo("old");
+
+            proxy.split(canary.getAddress().getPort(), 50);
+            int toCanary = 0;
+            for (int i = 0; i < 200; i++) {
+                if (get(proxy.port()).statusCode() == 500) {
+                    toCanary++;
+                }
+            }
+            assertThat(toCanary).isBetween(60, 140);
+            UpstreamProxy.SplitCount count = proxy.splitCount();
+            assertThat(count.canary()).isEqualTo(toCanary);
+            assertThat(count.canaryErrors()).isEqualTo(toCanary);
+            // 0% 일 때 보낸 첫 요청도 같은 카나리 포트라 이전 슬롯 쪽에 센다
+            assertThat(count.stable()).isEqualTo(201 - toCanary);
+            assertThat(count.stableErrors()).isZero();
+
+            proxy.switchTo(canary.getAddress().getPort());
+            proxy.switchTo(stable.getAddress().getPort());
+            assertThat(get(proxy.port()).body()).isEqualTo("old");
+            assertThatThrownBy(() -> proxy.split(1, 101)).isInstanceOf(IllegalArgumentException.class);
+        } finally {
+            proxy.close();
+            stable.stop(0);
+            canary.stop(0);
+        }
+    }
+
+    @Test
     void 로컬_앱_응답만_최근_1분에_센다() throws Exception {
         UpstreamProxy proxy = new UpstreamProxy(0);
         proxy.start();

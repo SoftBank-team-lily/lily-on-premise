@@ -6,6 +6,7 @@ import com.lily.onpremise.expose.CandidateJudge;
 import com.lily.onpremise.expose.PublicAddress;
 import com.lily.onpremise.expose.Readiness;
 import com.lily.onpremise.expose.TrafficSwitch;
+import com.lily.onpremise.expose.UpstreamProxy;
 import com.lily.onpremise.schema.SchemaApply;
 import com.lily.onpremise.schema.pgroll.PgrollEnv;
 import com.lily.onpremise.schema.pgroll.PgrollSet;
@@ -27,7 +28,8 @@ import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
- * 체크아웃 → Dockerfile → 스키마 → 놀고 있는 슬롯에 빌드·기동 → Ready → 후보 판정 → 그 다음에만 프록시를 옮긴다.
+ * 체크아웃 → Dockerfile → 스키마 → 놀고 있는 슬롯에 빌드·기동 → Ready → 후보 판정 → 카나리 → 그 다음에만 프록시를 옮긴다.
+ * 카나리({@link Canary})는 이전 슬롯이 있을 때 사용자 요청을 칸씩 새 슬롯으로 옮기고, 새 슬롯 5xx 가 많으면 이전 슬롯으로 되돌린다.
  * Ready 나 판정 전에 실패하면 후보 컨테이너만 지우고, 공개 주소는 이전 슬롯을 계속 본다.
  * 프록시를 옮긴 뒤에 이전 슬롯을 지우다 실패해도 새 슬롯은 남겨 둔다. 지운 슬롯의 이미지 태그는 롤백에 쓴다.
  */
@@ -50,6 +52,35 @@ public final class OnPremPipeline {
     private final DeployedApp deployed;
     private final PgrollStep pgroll;
     private final JobCancel cancel;
+    private final Canary canary;
+
+    /**
+     * 이전 슬롯이 있을 때 새 슬롯으로 보내는 요청 비율을 stepPercent 씩 올리고, 칸마다 stepSeconds 기다린다.
+     * stepPercent 가 0 이하이거나 100 이상이면 판정 뒤 한 번에 옮긴다.
+     */
+    public record Canary(int stepPercent, int stepSeconds) {
+
+        public static final Canary OFF = new Canary(100, 0);
+        /** 새 슬롯 5xx 비율이 이보다 높고 이전 슬롯보다 높으면 되돌린다. 후보 판정({@link CandidateJudge})과 같은 5% */
+        static final double MAX_ERROR_RATE = 0.05;
+
+        boolean enabled() {
+            return stepPercent > 0 && stepPercent < 100;
+        }
+
+        static Optional<String> reject(UpstreamProxy.SplitCount count) {
+            if (count.canary() == 0) {
+                return Optional.empty();
+            }
+            double canaryRate = (double) count.canaryErrors() / count.canary();
+            double stableRate = count.stable() == 0 ? 0 : (double) count.stableErrors() / count.stable();
+            if (canaryRate > MAX_ERROR_RATE && canaryRate > stableRate) {
+                return Optional.of(String.format("canary 5xx %d/%d (%.1f%%) > previous %d/%d",
+                        count.canaryErrors(), count.canary(), canaryRate * 100, count.stableErrors(), count.stable()));
+            }
+            return Optional.empty();
+        }
+    }
 
     public OnPremPipeline(
             Workspace workspace,
@@ -150,6 +181,28 @@ public final class OnPremPipeline {
             DeployedApp deployed,
             PgrollStep pgroll,
             JobCancel cancel) {
+        this(workspace, analyzer, runtime, readiness, traffic, addresses, slots, bluePort, greenPort,
+                databases, schema, judge, deployed, pgroll, cancel, Canary.OFF);
+    }
+
+    public OnPremPipeline(
+            Workspace workspace,
+            StackAnalyzer analyzer,
+            ContainerRuntime runtime,
+            Readiness readiness,
+            TrafficSwitch traffic,
+            PublicAddress addresses,
+            SlotBook slots,
+            int bluePort,
+            int greenPort,
+            DatabaseAccess databases,
+            SchemaApply schema,
+            CandidateJudge judge,
+            DeployedApp deployed,
+            PgrollStep pgroll,
+            JobCancel cancel,
+            Canary canary) {
+        this.canary = canary == null ? Canary.OFF : canary;
         this.cancel = cancel == null ? JobCancel.NONE : cancel;
         this.pgroll = pgroll == null ? PgrollStep.NONE : pgroll;
         this.databases = databases;
@@ -318,7 +371,20 @@ public final class OnPremPipeline {
             runtime.stop(name);
             throw new IllegalStateException("hostname failed, candidate removed: " + safe(e.getMessage()) + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
         }
+        if (upstream > 0 && canary.enabled()) {
+            try {
+                shift(record, publish, job, port);
+            } catch (RuntimeException e) {
+                traffic.split(0, 0);
+                runtime.stop(name);
+                String message = "cancelled".equals(e.getMessage())
+                        ? "cancelled, traffic back to previous"
+                        : "canary failed, traffic back to previous: " + safe(e.getMessage());
+                throw new IllegalStateException(message + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
+            }
+        }
         if (!cancel.commit(job.id())) {
+            traffic.split(0, 0);
             runtime.stop(name);
             throw new IllegalStateException("before switch, traffic unchanged, candidate removed"
                     + schemaNote(job, schemaApplied, pgrollMigration, agentEnv));
@@ -328,6 +394,7 @@ public final class OnPremPipeline {
         try {
             traffic.route(port);
         } catch (RuntimeException e) {
+            traffic.split(0, 0);
             runtime.stop(name);
             throw new IllegalStateException("switch failed, candidate removed: " + safe(e.getMessage()) + schemaNote(job, schemaApplied, pgrollMigration, agentEnv), e);
         }
@@ -359,6 +426,30 @@ public final class OnPremPipeline {
         record.activeSlot(target.name().toLowerCase());
         deployed.note(job, plan.origin() == DockerfilePlan.Origin.EXISTING);
         stage(record, publish, JobRecord.Status.SUCCEEDED, "done: " + published);
+    }
+
+    /** 새 슬롯 비율을 칸씩 올린다. 100% 는 이어지는 {@link TrafficSwitch#route} 가 맡는다 */
+    private void shift(JobRecord record, Consumer<JobRecord> publish, DeployJob job, int port) {
+        for (int percent = canary.stepPercent(); percent < 100; percent += canary.stepPercent()) {
+            cancel.check(job.id());
+            traffic.split(port, percent);
+            stage(record, publish, JobRecord.Status.SWITCHING, "canary: " + percent + "% → 127.0.0.1:" + port);
+            if (canary.stepSeconds() > 0) {
+                try {
+                    Thread.sleep(canary.stepSeconds() * 1000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("canary interrupted", e);
+                }
+            }
+            UpstreamProxy.SplitCount count = traffic.splitCount();
+            Optional<String> reason = Canary.reject(count);
+            if (reason.isPresent()) {
+                throw new IllegalStateException(reason.get());
+            }
+            stage(record, publish, JobRecord.Status.SWITCHING, "canary: " + percent + "% ok 5xx new="
+                    + count.canaryErrors() + "/" + count.canary() + " previous=" + count.stableErrors() + "/" + count.stable());
+        }
     }
 
     /**
