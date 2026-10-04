@@ -545,6 +545,7 @@ builder  → job     {..., "database": "postgres", "databaseEnv": {"DB_URL": "jd
 * 이 머신에 `CLOUDFLARE_API_TOKEN` 등이나 `DB_TUNNEL_*` 가 있으면 그 설정이 우선합니다 (팀 PC 의 `scripts/agent.sh` + `test/burst/*.env`)
 * welcome 에 `burst`(`ingressHost`, `ingressPort`, `cloudOrigin`, `app`)가 오면 버스팅과 거점 전환도 이 소켓으로 됩니다. builder 호출은 소켓 `burst` 로 중계합니다 (`RelayBurstClient`)
 * welcome `database` 에 `reverseHost`·`reversePort` 가 오면 이 PC 의 DB(`local`·`external`)를 그 주소로 클라우드 대기 Pod 에 엽니다
+* 앱의 클라우드가 GCP 면 builder 가 배포를 보내기 전에 `cloud-target`(`burst`, `database`)을 보냅니다. 버스트·거점 전환 대상은 GCP Ingress·GCP LB, DB 터널은 GCP 배스천 경유 Cloud SQL(정방향)과 GCP 배스천 사설 IP(역방향)로 바뀝니다. AWS 앱을 배포하면 AWS 값으로 되돌립니다. 다시 연결할 때의 welcome 은 이 에이전트로 마지막에 배포한 앱의 클라우드 값을 싣습니다 (`PlatformLink.cloudTarget`)
 
 접속 직후 에이전트가 보내는 메시지입니다.
 
@@ -735,6 +736,7 @@ SPRING_PROFILES_ACTIVE=local
 - 터널은 처음 연 뒤 5초마다 로컬 포트를 보고, 닫혀 있으면 다시 연다 (PC 가 잠들었다 깨거나 네트워크가 끊겨 ssh 가 끝난 경우). `ServerAliveInterval=10` 이라 끊긴 연결은 30초 안에 끝난다
 - 검증 (2026-10-02): 에이전트 안의 `ssh -L` 프로세스를 강제로 끊으면 약 1.2초 뒤 터널이 다시 열리고 앱 API 200
 - 에이전트가 다시 뜨면 다시 붙인 앱이 이 터널을 쓸 때 터널을 연다 (`SlotRecovery`)
+- 터널 대상(배스천·DB 주소)이 다른 클라우드로 바뀌면(`cloud-target`) 열린 ssh 를 끄고 로컬 포트가 닫힐 때까지 기다린 뒤 같은 로컬 포트로 새 대상에 다시 연다 (`PlatformDatabase.configure`, `DatabaseTunnel.close`). 열린 적 없는 터널은 대상만 바꾼다. 에이전트 하나는 앱 하나라 이 터널을 쓰는 앱이 곧 새 클라우드로 배포하는 앱이다
 
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
